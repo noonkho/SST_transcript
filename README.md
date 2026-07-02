@@ -33,7 +33,7 @@ From a terminal instead:
 ./start.sh          # or: uv sync && uv run sst-server
 ```
 
-### Linux / NVIDIA (e.g. DGX Spark) — Docker
+### Linux / NVIDIA — Docker
 
 ```bash
 docker compose up -d --build
