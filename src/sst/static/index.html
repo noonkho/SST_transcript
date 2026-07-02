@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SST — Speech to Text</title>
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="window">
+  <aside class="sidebar">
+    <div class="app-title">
+      <div class="app-icon">🎙️</div>
+      <div>
+        <div class="app-name">SST</div>
+        <div class="app-sub">Speech · Diarization</div>
+      </div>
+    </div>
+    <nav>
+      <button class="nav-item active" data-tab="transcribe"><span>📝</span> Transcribe</button>
+      <button class="nav-item" data-tab="dashboard"><span>📊</span> Dashboard</button>
+      <button class="nav-item" data-tab="models"><span>📦</span> Models</button>
+      <button class="nav-item" data-tab="settings"><span>⚙️</span> Settings</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="status-row"><span class="dot" id="server-dot"></span><span id="server-label">Connecting…</span></div>
+      <div class="device-label" id="device-label"></div>
+    </div>
+  </aside>
+
+  <main class="content">
+
+    <!-- ============ TRANSCRIBE ============ -->
+    <section class="tab active" id="tab-transcribe">
+      <h1>Transcribe</h1>
+      <div class="card">
+        <div class="dropzone" id="dropzone">
+          <div class="dz-icon">⬆️</div>
+          <div class="dz-title">Drop an audio file here</div>
+          <div class="dz-sub">or click to choose — mp3, m4a, wav, flac, mp4 &amp; more</div>
+          <input type="file" id="file-input" accept="audio/*,video/*" hidden>
+        </div>
+        <div class="options-row">
+          <label>Language
+            <select id="opt-language">
+              <option value="">Auto-detect</option>
+              <option value="yue">Cantonese 粵語</option>
+              <option value="zh">Mandarin 普通話</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          <label>Speakers
+            <select id="opt-speakers">
+              <option value="">Auto</option>
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+            </select>
+          </label>
+          <label class="toggle-label">Diarization
+            <input type="checkbox" id="opt-diarize" checked class="toggle">
+          </label>
+        </div>
+      </div>
+
+      <div class="card hidden" id="progress-card">
+        <div class="progress-head">
+          <span id="progress-file"></span>
+          <span class="progress-actions">
+            <span id="progress-stage" class="stage-chip"></span>
+            <button class="btn danger small" id="cancel-job">Cancel</button>
+          </span>
+        </div>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        <div class="progress-meta">
+          <span id="progress-pct">0%</span>
+          <span id="progress-eta"></span>
+          <span id="progress-elapsed"></span>
+        </div>
+      </div>
+
+      <div class="card hidden" id="result-card">
+        <div class="result-head">
+          <div>
+            <h2 id="result-title">Transcript</h2>
+            <div class="result-meta" id="result-meta"></div>
+          </div>
+          <div class="btn-group">
+            <button class="btn" data-dl="json">JSON</button>
+            <button class="btn" data-dl="vtt">VTT</button>
+            <button class="btn" data-dl="srt">SRT</button>
+            <button class="btn" data-dl="text">TXT</button>
+            <button class="btn" data-dl="docx">DOCX</button>
+          </div>
+        </div>
+        <audio id="player" controls preload="metadata"></audio>
+        <div class="speaker-bar" id="speaker-bar"></div>
+        <div class="edit-hint">▶ Click a line to play from there · ✏️ double-click a line to edit ·
+          in edit mode: <kbd>Enter</kbd> save · <kbd>Shift+Enter</kbd> split at cursor ·
+          <kbd>⌫</kbd> at line start merges up · <kbd>Esc</kbd> cancel</div>
+        <div class="segments" id="segments"></div>
+        <button class="btn" id="add-line-end">＋ Add line at end</button>
+      </div>
+
+      <div class="card" id="history-card">
+        <h2>Recent jobs</h2>
+        <div id="job-list" class="job-list"><div class="empty">No jobs yet</div></div>
+      </div>
+    </section>
+
+    <!-- ============ DASHBOARD ============ -->
+    <section class="tab" id="tab-dashboard">
+      <h1>Dashboard</h1>
+      <div class="grid-2">
+        <div class="card stat-card"><div class="stat-label">Server</div><div class="stat-value" id="d-server">—</div></div>
+        <div class="card stat-card"><div class="stat-label">Compute device</div><div class="stat-value" id="d-device">—</div></div>
+        <div class="card stat-card"><div class="stat-label">STT model loaded</div><div class="stat-value" id="d-stt">—</div></div>
+        <div class="card stat-card"><div class="stat-label">Diarization loaded</div><div class="stat-value" id="d-diar">—</div></div>
+      </div>
+      <div class="card" id="ffmpeg-warning" style="display:none">
+        <strong>⚠️ ffmpeg not found.</strong> Audio decoding needs ffmpeg — install with <code>brew install ffmpeg</code>.
+      </div>
+      <div class="card" id="dash-attribution" style="display:none">
+        <h2>Model credits</h2>
+        <p class="hint" style="margin-top:0">Speaker diarization by
+          <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank">“speaker-diarization-community-1”</a>
+          © <a href="https://www.pyannote.ai/" target="_blank">pyannoteAI</a>, licensed under
+          <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">CC BY 4.0</a>.
+          Used without modification. Keep this credit in products built on this service.</p>
+      </div>
+      <div class="card">
+        <h2>API endpoints</h2>
+        <div class="api-row"><code>POST /v1/audio/transcriptions</code><span>OpenAI-compatible transcription with diarization</span></div>
+        <div class="api-row"><code>GET /v1/models</code><span>List downloaded models</span></div>
+        <div class="api-row"><code>GET /docs</code><span>Interactive API documentation</span></div>
+      </div>
+    </section>
+
+    <!-- ============ MODELS ============ -->
+    <section class="tab" id="tab-models">
+      <h1>Models</h1>
+      <div class="card">
+        <h2>Active models</h2>
+        <div class="options-row">
+          <label>Speech-to-text
+            <select id="sel-stt"></select>
+          </label>
+          <label>Diarization
+            <select id="sel-diar"></select>
+          </label>
+          <button class="btn primary" id="apply-models">Apply &amp; load</button>
+        </div>
+        <div class="hint">Only downloaded models appear here. Models load once and stay in memory for fast transcription.</div>
+      </div>
+
+      <div class="card">
+        <h2>Speech-to-text models</h2>
+        <div id="stt-catalog"></div>
+      </div>
+      <div class="card">
+        <h2>Diarization models</h2>
+        <div id="diar-catalog"></div>
+      </div>
+
+      <div class="card">
+        <h2>Search Hugging Face</h2>
+        <div class="search-row">
+          <input type="search" id="hf-query" placeholder="Search speech recognition models… e.g. whisper cantonese">
+          <button class="btn primary" id="hf-search-btn">Search</button>
+        </div>
+        <div id="hf-results"></div>
+      </div>
+    </section>
+
+    <!-- ============ SETTINGS ============ -->
+    <section class="tab" id="tab-settings">
+      <h1>Settings</h1>
+      <div class="card">
+        <h2>Hugging Face token</h2>
+        <p class="hint">Needed once for gated models (pyannote diarization). Create a free token at
+          <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co/settings/tokens</a>, and accept the terms of
+          <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">pyannote/speaker-diarization-3.1</a> and
+          <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">pyannote/segmentation-3.0</a>.
+          The token is stored locally and only used to download models.</p>
+        <div class="search-row">
+          <input type="password" id="hf-token" placeholder="hf_…">
+          <button class="btn primary" id="save-token">Save</button>
+        </div>
+        <div class="hint" id="token-state"></div>
+      </div>
+      <div class="card">
+        <h2>Compute device</h2>
+        <div class="options-row">
+          <label>Device
+            <select id="sel-device">
+              <option value="">Auto (recommended)</option>
+              <option value="cuda">CUDA (NVIDIA GPU)</option>
+              <option value="mps">MPS (Apple Silicon)</option>
+              <option value="cpu">CPU</option>
+            </select>
+          </label>
+          <button class="btn" id="save-device">Save</button>
+        </div>
+        <div class="hint">Changing device takes effect the next time models are loaded.</div>
+      </div>
+      <div class="card">
+        <h2>Credits &amp; licenses</h2>
+        <p class="hint" style="margin-top:0">
+          Speaker diarization (default): <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank">“speaker-diarization-community-1”</a>
+          © <a href="https://www.pyannote.ai/" target="_blank">pyannoteAI</a>, licensed under
+          <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">CC BY 4.0</a> — used without modification.
+          If you ship a commercial product using it, include this credit in your product's documentation or about page.<br>
+          Other components: OpenAI Whisper (Apache-2.0) · Silero VAD (MIT) ·
+          SpeechBrain ECAPA-TDNN (Apache-2.0) · pyannote.audio library (MIT).
+          Each model's license is shown in the Models tab.
+        </p>
+      </div>
+      <div class="card">
+        <h2>Job history</h2>
+        <div class="options-row">
+          <label>Keep last … jobs
+            <input type="number" id="max-jobs" min="3" max="20" step="1" value="5">
+          </label>
+          <button class="btn" id="save-max-jobs">Save</button>
+        </div>
+        <div class="hint">Finished jobs (transcript + original audio) are kept on disk so playback and
+          editing survive restarts. Oldest jobs beyond this limit are deleted automatically (3–20, default 5).</div>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

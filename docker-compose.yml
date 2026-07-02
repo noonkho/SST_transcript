@@ -1,0 +1,22 @@
+services:
+  sst:
+    build: .
+    container_name: sst
+    restart: unless-stopped
+    ports:
+      - "8756:8756"
+    volumes:
+      - sst-models:/cache        # downloaded models (persist between restarts)
+      - sst-data:/data           # config + job state
+    # Remove the `deploy` block below to run CPU-only.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  sst-models:
+  sst-data:
