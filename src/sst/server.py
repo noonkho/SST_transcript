@@ -251,6 +251,17 @@ def api_download(body: dict):
     return {"repo_id": repo_id, "status": state.status}
 
 
+@app.post("/api/models/download/cancel")
+def api_download_cancel(body: dict):
+    repo_id = body.get("repo_id", "")
+    if not repo_id:
+        raise HTTPException(400, "repo_id required")
+    state = manager.cancel_download(repo_id)
+    if state is None:
+        raise HTTPException(404, "no download for this model")
+    return {"repo_id": repo_id, "status": state.status}
+
+
 @app.post("/api/models/remove")
 def api_remove(body: dict):
     repo_id = body.get("repo_id", "")

@@ -604,7 +604,19 @@ function syncSearchRows(sttEntries) {
     const m = sttEntries.find((e) => e.repo_id === cell.dataset.searchRepo);
     if (!m) return;
     if (m.download && m.download.status === "downloading") {
-      cell.innerHTML = `<div class="dl-progress">${dlProgressText(m.download)}</div>`;
+      cell.innerHTML = `<div class="dl-progress">${dlProgressText(m.download)}</div>
+                        <button class="btn danger small" data-cancel-dl="${m.repo_id}">✕ Cancel</button>`;
+      cell.querySelector("[data-cancel-dl]").addEventListener("click", () => cancelDownload(m.repo_id));
+    } else if (m.download && m.download.status === "cancelled" && !m.downloaded) {
+      cell.innerHTML = `<button class="btn primary" data-dl-repo="${m.repo_id}">Download</button>`;
+      cell.querySelector("[data-dl-repo]").addEventListener("click", async (e) => {
+        e.target.disabled = true; e.target.textContent = "Starting…";
+        await fetch("/api/models/download", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo_id: m.repo_id }),
+        });
+        refreshModels();
+      });
     } else if (m.download && m.download.status === "error") {
       cell.innerHTML = `<div class="dl-error">${m.download.error}</div>
                         <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
@@ -657,7 +669,10 @@ function fmtBytes(n) {
 function dlProgressText(dl) {
   if (!dl.total_bytes) return "downloading… " + fmtBytes(dl.downloaded_bytes);
   const pct = Math.round(dl.progress * 100);
-  const eta = dl.eta_seconds != null && dl.eta_seconds > 1 ? ` · ~${fmtDur(dl.eta_seconds)} left` : "";
+  let eta = "";
+  if (dl.eta_seconds != null && dl.eta_seconds > 1) {
+    eta = dl.eta_seconds > 86400 ? " · slow connection" : ` · ~${fmtDur(dl.eta_seconds)} left`;
+  }
   return `${pct}% · ${fmtBytes(dl.downloaded_bytes)} / ${fmtBytes(dl.total_bytes)}${eta}`;
 }
 
@@ -673,7 +688,8 @@ function renderCatalog(container, entries) {
     ].join("");
     let action;
     if (m.download && m.download.status === "downloading") {
-      action = `<div class="dl-progress">${dlProgressText(m.download)}</div>`;
+      action = `<div class="dl-progress">${dlProgressText(m.download)}</div>
+                <button class="btn danger small" data-cancel-dl="${m.repo_id}">✕ Cancel</button>`;
     } else if (m.download && m.download.status === "error") {
       action = `<div class="dl-error">${m.download.error}</div>
                 <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
@@ -713,6 +729,18 @@ function renderCatalog(container, entries) {
   container.querySelectorAll("[data-rm-repo]").forEach((btn) => {
     btn.addEventListener("click", () => removeModel(btn.dataset.rmRepo));
   });
+  container.querySelectorAll("[data-cancel-dl]").forEach((btn) => {
+    btn.addEventListener("click", () => cancelDownload(btn.dataset.cancelDl));
+  });
+}
+
+async function cancelDownload(repoId) {
+  if (!confirm(`Cancel downloading "${repoId}"? Partially downloaded files will be removed.`)) return;
+  await fetch("/api/models/download/cancel", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_id: repoId }),
+  });
+  refreshModels();
 }
 
 async function removeModel(repoId) {

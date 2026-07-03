@@ -5,12 +5,16 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 
 import huggingface_hub
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi
 
 from .config import DATA_DIR, config
 from .device import pick_device
@@ -29,7 +33,7 @@ IGNORE_ALWAYS = ["*.msgpack", "*.h5", "*.tflite", "*flax*", "*.onnx", "*.mlmodel
 @dataclass
 class DownloadState:
     repo_id: str
-    status: str = "downloading"      # downloading | done | error
+    status: str = "downloading"      # downloading | done | error | cancelled
     progress: float = 0.0            # 0..1
     downloaded_bytes: int = 0
     total_bytes: int = 0
@@ -55,26 +59,28 @@ def _bytes_on_disk(repo_ids: list[str]) -> int:
 
 def _watch_download(state: DownloadState, targets: list[str]) -> None:
     """Filesystem-based progress: independent of the hub's download backend."""
-    prev_bytes = _bytes_on_disk(targets)
-    prev_t = time.time()
-    rate = 0.0
+    start_bytes = _bytes_on_disk(targets)  # non-zero when resuming
+    start_t = time.time()
     while state.status == "downloading":
         time.sleep(1.0)
         now_bytes = _bytes_on_disk(targets)
-        now_t = time.time()
-        delta = (now_bytes - prev_bytes) / max(now_t - prev_t, 1e-3)
-        rate = 0.7 * rate + 0.3 * max(delta, 0.0)  # smoothed bytes/sec
-        prev_bytes, prev_t = now_bytes, now_t
         state.downloaded_bytes = now_bytes
-        if state.total_bytes:
-            state.progress = min(0.999, now_bytes / state.total_bytes)
-            if rate > 1024:
-                state.eta_seconds = max(0.0, (state.total_bytes - now_bytes) / rate)
+        if not state.total_bytes:
+            continue
+        state.progress = min(0.999, now_bytes / state.total_bytes)
+        # Average rate over the whole session: stable on bursty connections.
+        elapsed = time.time() - start_t
+        rate = (now_bytes - start_bytes) / max(elapsed, 1.0)
+        if elapsed > 5 and rate > 1024:
+            state.eta_seconds = max(0.0, (state.total_bytes - now_bytes) / rate)
+        else:
+            state.eta_seconds = None
 
 
 class ModelManager:
     def __init__(self) -> None:
         self.downloads: dict[str, DownloadState] = {}
+        self._dl_procs: dict[str, subprocess.Popen] = {}
         self._dl_lock = threading.Lock()
 
         self.stt_engine = None
@@ -156,12 +162,25 @@ class ModelManager:
             watcher = threading.Thread(target=_watch_download, args=(state, targets), daemon=True)
             watcher.start()
             for target, ignore in plans:
-                snapshot_download(
-                    target,
-                    token=config.hf_token or None,
-                    ignore_patterns=ignore,
+                if state.status == "cancelled":
+                    break
+                # Child process so a cancel can actually stop the transfer.
+                env = {**os.environ, "HF_TOKEN": config.hf_token or ""}
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "sst._dl_worker", target, json.dumps(ignore)],
+                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 )
+                self._dl_procs[repo_id] = proc
+                _, stderr = proc.communicate()
+                if state.status == "cancelled":
+                    break
+                if proc.returncode != 0:
+                    lines = stderr.decode(errors="replace").strip().splitlines()
+                    raise RuntimeError(lines[-1][:300] if lines else "download failed")
                 self._mark_complete(target)
+            if state.status == "cancelled":
+                self._cleanup_partial(targets)
+                return
             self._mark_complete(repo_id)
             state.downloaded_bytes = max(state.downloaded_bytes, state.total_bytes)
             state.progress = 1.0
@@ -184,6 +203,28 @@ class ModelManager:
             else:
                 state.error = msg.splitlines()[0][:300] if msg else "download failed"
             log.exception("download failed for %s", repo_id)
+        finally:
+            self._dl_procs.pop(repo_id, None)
+
+    def cancel_download(self, repo_id: str) -> DownloadState | None:
+        """Stop an in-flight download and remove its partial files."""
+        state = self.downloads.get(repo_id)
+        if not state or state.status != "downloading":
+            return state
+        state.status = "cancelled"
+        state.eta_seconds = None
+        proc = self._dl_procs.get(repo_id)
+        if proc and proc.poll() is None:
+            proc.terminate()  # the download thread then runs _cleanup_partial
+        log.info("download cancelled: %s", repo_id)
+        return state
+
+    def _cleanup_partial(self, targets: list[str]) -> None:
+        """Delete cache dirs of targets that never completed (partial files)."""
+        for target in targets:
+            if target in self._completed:
+                continue  # was already fully downloaded before this attempt
+            shutil.rmtree(_repo_cache_dir(target), ignore_errors=True)
 
     def custom_downloaded(self) -> list[dict]:
         """Downloaded repos that are not part of the curated catalog
