@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from .audio import COMPRESSED_EXTENSIONS, transcode_for_storage
 from .config import DATA_DIR, config
 
 log = logging.getLogger("sst.jobs")
@@ -228,8 +229,38 @@ class JobStore:
                 ticker.set()
                 job.finished_at = time.time()
                 job.elapsed_seconds = job.finished_at - (job.started_at or job.finished_at)
+                if job.status == "done":
+                    self._compress_audio(job)
+                else:
+                    # No transcript to play along to — don't keep the audio.
+                    if job.audio_path:
+                        Path(job.audio_path).unlink(missing_ok=True)
+                        job.audio_path = ""
                 self.save(job)
                 self.enforce_limit()
+                self._release_memory()
+
+    @staticmethod
+    def _compress_audio(job: Job) -> None:
+        """Shrink the stored copy: uncompressed uploads (wav/flac/aiff…) are
+        re-encoded to mono AAC for playback (a 1 GB wav becomes ~40 MB)."""
+        src = Path(job.audio_path) if job.audio_path else None
+        if not src or not src.exists() or src.suffix.lower() in COMPRESSED_EXTENSIONS:
+            return
+        dest = src.with_suffix(".m4a")
+        if transcode_for_storage(str(src), str(dest)):
+            src.unlink(missing_ok=True)
+            job.audio_path = str(dest)
+        else:
+            dest.unlink(missing_ok=True)  # keep the original if transcoding failed
+
+    @staticmethod
+    def _release_memory() -> None:
+        try:
+            from .manager import manager
+            manager._free_memory()  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            pass
 
 
 jobs = JobStore()

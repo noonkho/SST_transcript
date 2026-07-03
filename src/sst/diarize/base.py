@@ -19,5 +19,8 @@ class Diarizer:
         self,
         audio: np.ndarray,
         num_speakers: int | None = None,
+        speech: list[tuple[float, float]] | None = None,
     ) -> list[SpeakerTurn]:
+        """`speech` are pre-computed VAD regions [(start_s, end_s), ...]; engines
+        that have their own voice-activity detection may ignore it."""
         raise NotImplementedError

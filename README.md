@@ -33,7 +33,7 @@ From a terminal instead:
 ./start.sh          # or: uv sync && uv run sst-server
 ```
 
-### Linux / NVIDIA — Docker
+### Linux / NVIDIA (e.g. DGX Spark) — Docker
 
 ```bash
 docker compose up -d --build
@@ -68,11 +68,53 @@ Open the **Models** tab to download and switch models. Guidance:
 | **pyannote 3.1** (diarization) | Same job, previous generation | 30 MB | Gated — free HF token; pure MIT license |
 | **Built-in** (diarization) | Zero-setup diarization | 90 MB | VAD + ECAPA embeddings + clustering (see below) |
 
-You can also search Hugging Face from the Models tab (e.g. a Whisper fine-tuned
-for Cantonese) and download compatible models directly.
-
 Only one STT model is held in memory at a time (models load once at startup and
-stay resident for low latency).
+stay resident for low latency). Switching models while a transcription is running
+is safe — the switch waits until the current job finishes.
+
+### Adding models from Hugging Face / removing models
+
+The catalog above is the curated default list; you can extend it. In
+**Models → Search Hugging Face**, type e.g. `whisper cantonese` — real results
+include community fine-tunes such as `alvanlii/whisper-small-cantonese`
+(350k+ downloads). Results show download counts and a compatibility badge.
+Click **Download** and the model appears in the *Speech-to-text models* list
+(marked "Added from Hugging Face search") and in the model selector, like any
+built-in entry. Check the model's page for its license before commercial use.
+
+Every downloaded model — curated or custom — has a **Remove** button that deletes
+its files from local storage (you can re-download any time). The model currently
+selected/loaded can't be removed; switch to another model first.
+
+**Will a searched model run on my machine?** Yes, if it carries the
+`compatible` badge. Everything in this service runs through **PyTorch**, which
+covers all supported hardware with the same code and settings — Apple Silicon
+(MPS), NVIDIA (CUDA), and plain CPU. A compatible model is compatible
+*everywhere*; there is no macOS-only or Linux-only model, and no per-OS
+configuration. What the badge filters out is repos published in a **different
+runtime's format** — `mlx-community/…` (MLX), `…-ct2` / faster-whisper
+(CTranslate2), GGUF/GGML (whisper.cpp), ONNX — which this service intentionally
+does not load. Those are alternative *packagings* of the same models, not
+better ones for your Mac: if you see `mlx-community/whisper-large-v3`, just use
+the standard `openai/whisper-large-v3` — same weights, runs on your GPU via
+PyTorch/MPS.
+
+### Offline / air-gapped use
+
+Only the **first download** of each model needs the Internet; after that,
+everything runs fully offline (models are cached in `~/.cache/huggingface`).
+Models aren't bundled in this repository because they're multi-GB and some
+(pyannote) are distributed through gated Hugging Face repos.
+
+To prepare a machine with **no Internet at all**:
+
+1. On a connected machine, download the models you need via the Models tab.
+2. Copy `~/.cache/huggingface/hub` to the same path on the offline machine
+   (or anywhere, and point `HF_HOME` at it).
+3. Copy `data/downloaded_models.json` from this project folder too — it's the
+   record of which models are complete.
+4. Optionally set `HF_HUB_OFFLINE=1` on the offline machine so nothing ever
+   attempts a network call.
 
 ### Model licensing / commercial use
 
@@ -102,10 +144,8 @@ This project uses the following third-party models and libraries:
 
 If you build a product on top of this service with community-1 as the diarizer,
 **carry this credit forward** into your product's documentation or about page
-(that's the only condition of CC BY 4.0). The credit is also displayed inside the
-app: in **Settings → Credits & licenses**, on the model's card in the **Models**
-tab once downloaded, and on the **Dashboard** whenever community-1 is the loaded
-diarizer.
+(that's the only condition of CC BY 4.0 — attribution "in any reasonable manner";
+an in-app display is not required).
 
 Other components (no attribution required, listed for completeness):
 [OpenAI Whisper](https://huggingface.co/openai/whisper-large-v3) (Apache-2.0) ·
@@ -165,9 +205,12 @@ line** so you can listen while you fix the text. Controls:
 | Change the line's speaker | Dropdown in the edit toolbar (includes "＋ New speaker…") |
 | Discard changes | <kbd>Esc</kbd> or **Cancel** |
 
-**Rename speakers** (e.g. `SPEAKER_00` → `Alice`): click a speaker chip in the
-bar above the transcript, type the new name, press <kbd>Enter</kbd>. The rename
-applies to every line of that speaker.
+**Rename / recolour speakers**: click a speaker chip in the bar above the
+transcript — a small panel opens where you can type a new name (e.g.
+`SPEAKER_00` → `Alice`) and pick one of 10 colours. Both apply to every line of
+that speaker and are saved with the transcript. (By default each speaker name
+gets a stable colour derived from the name itself, so colours no longer shuffle
+around after edits.)
 
 All edits are **saved on the server immediately** — exports (JSON/VTT/SRT/TXT/DOCX)
 always reflect your edits, and edits survive restarts.
@@ -179,11 +222,16 @@ Buttons at the top of the result card: **JSON**, **VTT**, **SRT**, **TXT**, and
 
 ### Job history & retention
 
-Finished jobs (transcript + original audio) are kept on disk. The server keeps
+Finished jobs (transcript + audio for playback) are kept on disk. The server keeps
 the **last 5 jobs** by default (configurable **3–20** in *Settings → Job history*);
 older ones are auto-deleted. Each job row has a **🗑 delete** button, and
 running/queued jobs have a **■ Cancel** button (also available on the progress
 card during transcription).
+
+To save disk space, uncompressed uploads (wav/flac/aiff…) are re-encoded to
+mono AAC (~40 MB per hour instead of ~1 GB) after transcription — playback
+quality is unaffected. Already-compressed uploads (mp3/m4a/…) are stored as-is.
+Failed or cancelled jobs don't keep their audio.
 
 ## API
 

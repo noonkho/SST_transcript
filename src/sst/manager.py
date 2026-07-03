@@ -61,7 +61,11 @@ class ModelManager:
         self.stt_repo: str | None = None
         self.diar_engine = None
         self.diar_repo: str | None = None
-        self._load_lock = threading.Lock()
+        # Serializes model loading/unloading WITH job execution: a model switch
+        # requested mid-transcription waits until the running job finishes, so
+        # two large models are never resident at the same time. RLock because
+        # the pipeline holds it for the whole job and calls ensure_loaded inside.
+        self.engines_lock = threading.RLock()
 
         self._completed: set[str] = set()
         if COMPLETED_PATH.exists():
@@ -148,6 +152,41 @@ class ModelManager:
                 state.error = msg.splitlines()[0][:300] if msg else "download failed"
             log.exception("download failed for %s", repo_id)
 
+    def custom_downloaded(self) -> list[dict]:
+        """Downloaded repos that are not part of the curated catalog
+        (added via Hugging Face search)."""
+        from .registry import CATALOG
+        known = {e.repo_id for e in CATALOG} | set(BUILTIN_DIARIZATION_DEPS)
+        out = []
+        for repo in sorted(self.downloaded_repos()):
+            if repo in known or repo.startswith("builtin/"):
+                continue
+            engine = classify_hf_model(repo, [])
+            out.append({"repo_id": repo, "engine": engine, "supported": engine is not None})
+        return out
+
+    def delete_model(self, repo_id: str) -> None:
+        """Remove a downloaded model from the local cache to free storage."""
+        if repo_id in (self.stt_repo, self.diar_repo):
+            raise RuntimeError("This model is currently loaded — switch to another model first.")
+        if repo_id in (config.stt_model, config.diarization_model):
+            raise RuntimeError("This model is currently selected — select another model first.")
+        targets = BUILTIN_DIARIZATION_DEPS if repo_id == "builtin/vad-ecapa-clustering" else [repo_id]
+        info = huggingface_hub.scan_cache_dir()
+        hashes = [
+            rev.commit_hash
+            for repo in info.repos if repo.repo_id in targets
+            for rev in repo.revisions
+        ]
+        if hashes:
+            info.delete_revisions(*hashes).execute()
+        for target in [*targets, repo_id]:
+            self._completed.discard(target)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        COMPLETED_PATH.write_text(json.dumps(sorted(self._completed)))
+        self.downloads.pop(repo_id, None)  # so the UI offers "Download" again
+        log.info("removed model %s from cache", repo_id)
+
     # ---------------- HF search
 
     def search_hub(self, query: str, limit: int = 20) -> list[dict]:
@@ -160,7 +199,7 @@ class ModelManager:
             sort="downloads", direction=-1, limit=limit,
         )
         for m in models:
-            engine = classify_hf_model(m.id, m.tags or [])
+            engine = classify_hf_model(m.id, m.tags or [], getattr(m, "library_name", None))
             results.append({
                 "repo_id": m.id,
                 "downloads": m.downloads,
@@ -183,7 +222,7 @@ class ModelManager:
         """Load (or switch) the STT and diarization engines. Blocking; serialized."""
         stt_repo = stt_repo or config.stt_model
         diar_repo = diar_repo or config.diarization_model
-        with self._load_lock:
+        with self.engines_lock:
             if self.stt_repo != stt_repo or self.stt_engine is None:
                 self._unload_stt()
                 self.stt_engine = self._build_stt(stt_repo)

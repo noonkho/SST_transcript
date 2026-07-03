@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import mimetypes
@@ -32,11 +33,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="SST — Local Speech-to-Text + Diarization", version=__version__)
 
-
-@app.on_event("startup")
-def _preload_models() -> None:
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI):
     """Load configured models once at startup (in background) for 24/7 low latency."""
     def load():
         downloaded = manager.downloaded_repos()
@@ -56,6 +55,14 @@ def _preload_models() -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("model preload deferred: %s", exc)
     threading.Thread(target=load, daemon=True).start()
+    yield
+
+
+app = FastAPI(
+    title="SST — Local Speech-to-Text + Diarization",
+    version=__version__,
+    lifespan=_lifespan,
+)
 
 
 # ------------------------------------------------------------------ helpers
@@ -184,21 +191,40 @@ def api_status():
 @app.get("/api/models")
 def api_models():
     downloaded = manager.downloaded_repos()
-    def enrich(entry):
-        d = asdict(entry)
-        d["downloaded"] = entry.repo_id in downloaded
-        dl = manager.downloads.get(entry.repo_id)
+
+    def annotate(d: dict, repo_id: str) -> dict:
+        d["downloaded"] = repo_id in downloaded
+        dl = manager.downloads.get(repo_id)
         d["download"] = None if dl is None else {
             "status": dl.status, "progress": dl.progress,
             "downloaded_bytes": dl.downloaded_bytes, "total_bytes": dl.total_bytes,
             "error": dl.error,
         }
-        d["selected"] = entry.repo_id in (config.stt_model, config.diarization_model)
-        d["loaded"] = entry.repo_id in (manager.stt_repo, manager.diar_repo)
+        d["selected"] = repo_id in (config.stt_model, config.diarization_model)
+        d["loaded"] = repo_id in (manager.stt_repo, manager.diar_repo)
         return d
+
+    stt = [annotate(asdict(e), e.repo_id) for e in STT_CATALOG]
+    # Models added via Hugging Face search appear alongside the curated ones.
+    for custom in manager.custom_downloaded():
+        stt.append(annotate({
+            "repo_id": custom["repo_id"],
+            "kind": "stt",
+            "engine": custom["engine"] or "unknown",
+            "display_name": custom["repo_id"],
+            "languages": "see model page",
+            "size": "",
+            "strengths": "Added from Hugging Face search."
+                         + ("" if custom["supported"] else " Unsupported architecture — cannot be loaded."),
+            "license": "See the model page on huggingface.co",
+            "gated": False,
+            "word_timestamps": custom["engine"] == "whisper",
+            "requires_extra": "",
+            "tags": ["custom"],
+        }, custom["repo_id"]))
     return {
-        "stt": [enrich(e) for e in STT_CATALOG],
-        "diarization": [enrich(e) for e in DIARIZATION_CATALOG],
+        "stt": stt,
+        "diarization": [annotate(asdict(e), e.repo_id) for e in DIARIZATION_CATALOG],
     }
 
 
@@ -212,6 +238,18 @@ def api_download(body: dict):
         raise HTTPException(400, f"'{repo_id}' is gated — add your Hugging Face token in Settings first.")
     state = manager.start_download(repo_id)
     return {"repo_id": repo_id, "status": state.status}
+
+
+@app.post("/api/models/remove")
+def api_remove(body: dict):
+    repo_id = body.get("repo_id", "")
+    if not repo_id:
+        raise HTTPException(400, "repo_id required")
+    try:
+        manager.delete_model(repo_id)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"ok": True}
 
 
 @app.get("/api/models/search")
@@ -239,7 +277,13 @@ def api_config(body: dict):
             raise HTTPException(400, "max_jobs must be a number between 3 and 20") from None
         jobs.enforce_limit()
     config.save()
-    if changed_models and body.get("load_now", True):
+    # Load when the selection changed OR when what's in memory differs from the
+    # selection (e.g. a per-request model override loaded something else).
+    out_of_sync = (
+        manager.stt_repo != config.stt_model
+        or manager.diar_repo != config.diarization_model
+    )
+    if (changed_models or out_of_sync) and body.get("load_now", True):
         def load():
             try:
                 manager.ensure_loaded()
@@ -297,12 +341,17 @@ def api_job_delete(job_id: str):
     return {"ok": True}
 
 
+# Browser-friendly types where mimetypes guesses poorly (.m4a → audio/mp4a-latm).
+_AUDIO_MIME = {".m4a": "audio/mp4", ".aac": "audio/aac", ".opus": "audio/ogg", ".caf": "audio/x-caf"}
+
+
 @app.get("/api/jobs/{job_id}/audio")
 def api_job_audio(job_id: str):
     job = jobs.get(job_id)
     if not job or not job.audio_path or not Path(job.audio_path).exists():
         raise HTTPException(404, "audio not available for this job")
-    media_type = mimetypes.guess_type(job.audio_path)[0] or "application/octet-stream"
+    suffix = Path(job.audio_path).suffix.lower()
+    media_type = _AUDIO_MIME.get(suffix) or mimetypes.guess_type(job.audio_path)[0] or "application/octet-stream"
     return FileResponse(job.audio_path, media_type=media_type)
 
 
@@ -332,6 +381,13 @@ def api_job_update_result(job_id: str, body: dict):
     result["speakers"] = sorted({s["speaker"] for s in cleaned})
     result["text"] = " ".join(s["text"] for s in cleaned).strip()
     result["edited"] = True
+    colors = body.get("speaker_colors")
+    if isinstance(colors, dict):
+        result["speaker_colors"] = {
+            str(name)[:80]: int(idx) % 10
+            for name, idx in colors.items()
+            if isinstance(idx, (int, float)) and str(name) in result["speakers"]
+        }
     jobs.update_result(job, result)
     return {"ok": True, "result": result}
 

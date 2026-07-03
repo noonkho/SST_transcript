@@ -15,7 +15,6 @@ class CatalogEntry:
     size: str
     strengths: str
     license: str = ""            # SPDX-ish id + commercial-use note, shown in UI
-    attribution: str = ""        # credit line required by the model's license (e.g. CC-BY)
     gated: bool = False
     word_timestamps: bool = False
     requires_extra: str = ""     # optional uv extra needed
@@ -90,9 +89,7 @@ DIARIZATION_CATALOG: list[CatalogEntry] = [
         size="~30 MB",
         strengths="Best open-source diarization accuracy (2026 benchmarks); handles overlapping "
                   "speech. Gated: requires a free Hugging Face token (one-time). Default choice.",
-        license="CC-BY-4.0 — commercial use allowed with attribution ('uses pyannote community-1')",
-        attribution="Speaker diarization by “speaker-diarization-community-1” © pyannoteAI, "
-                    "licensed under CC BY 4.0. Used without modification.",
+        license="CC-BY-4.0 — commercial use allowed with attribution (see README)",
         gated=True,
         tags=["default"],
     ),
@@ -134,13 +131,32 @@ def find_entry(repo_id: str) -> CatalogEntry | None:
     return None
 
 
-def classify_hf_model(repo_id: str, hf_tags: list[str]) -> str | None:
-    """Best-effort engine detection for models found via HF search."""
+# Weight formats that need a different runtime (MLX, whisper.cpp, CTranslate2,
+# ONNX…). This service runs everything through PyTorch — which itself covers
+# Apple Silicon (MPS), NVIDIA (CUDA), and plain CPU — so these are rejected
+# rather than failing confusingly at load time.
+_FOREIGN_FORMAT_MARKERS = (
+    "mlx", "gguf", "ggml", "ctranslate2", "-ct2", "ct2-", "faster-whisper",
+    "onnx", "openvino", "coreml", "tflite", "tensorrt",
+)
+
+
+def classify_hf_model(repo_id: str, hf_tags: list[str], library: str | None = None) -> str | None:
+    """Best-effort engine detection for models found via HF search.
+
+    Returns the engine name for models this service can load (PyTorch /
+    transformers format), or None for unsupported architectures and formats.
+    """
     lowered = repo_id.lower()
-    if "whisper" in lowered:
+    tagset = {t.lower() for t in hf_tags}
+    if any(marker in lowered for marker in _FOREIGN_FORMAT_MARKERS):
+        return None
+    if tagset & set(_FOREIGN_FORMAT_MARKERS):
+        return None
+    if library and library.lower() not in ("transformers", "funasr"):
+        return None
+    if "whisper" in lowered or "whisper" in tagset:
         return "whisper"
     if "sensevoice" in lowered:
         return "sensevoice"
-    if any("whisper" in t.lower() for t in hf_tags):
-        return "whisper"
     return None

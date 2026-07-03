@@ -21,6 +21,14 @@ W_LOAD, W_DECODE, W_DIAR, W_STT = 0.05, 0.05, 0.15, 0.73
 
 
 def run_transcription(job: Job, audio_path: str) -> dict:
+    # Hold the engines lock for the whole job: a model switch requested from the
+    # UI mid-transcription waits until this job finishes instead of loading a
+    # second multi-GB model alongside the one in use.
+    with manager.engines_lock:
+        return _run_locked(job, audio_path)
+
+
+def _run_locked(job: Job, audio_path: str) -> dict:
     params = job.params
     language = params.get("language") or None
     num_speakers = params.get("num_speakers") or None
@@ -31,7 +39,12 @@ def run_transcription(job: Job, audio_path: str) -> dict:
     job.stage = "loading models"
     job.progress = 0.0
     manager.ensure_loaded(stt_repo=stt_model, diar_repo=diar_model, load_diar=diarize)
+    # Capture engines and repo names now — manager state can't change while we
+    # hold the engines lock, but the result must reflect what actually ran.
     stt = manager.stt_engine
+    diar_engine = manager.diar_engine if diarize else None
+    stt_repo_used = manager.stt_repo
+    diar_repo_used = manager.diar_repo if diarize else None
     job.progress = W_LOAD
     job.check_cancelled()
 
@@ -50,7 +63,7 @@ def run_transcription(job: Job, audio_path: str) -> dict:
     turns: list[SpeakerTurn] = []
     if diarize and chunks:
         job.stage = "diarizing"
-        turns = manager.diar_engine.diarize(audio, num_speakers=num_speakers)
+        turns = diar_engine.diarize(audio, num_speakers=num_speakers, speech=speech)
     job.progress = W_LOAD + W_DECODE + W_DIAR
     job.check_cancelled()
 
@@ -96,8 +109,8 @@ def run_transcription(job: Job, audio_path: str) -> dict:
         "text": " ".join(s["text"] for s in out_segments).strip(),
         "segments": out_segments,
         "speakers": sorted({s["speaker"] for s in out_segments}),
-        "model": manager.stt_repo,
-        "diarization_model": manager.diar_repo if turns else None,
+        "model": stt_repo_used,
+        "diarization_model": diar_repo_used if turns else None,
     }
 
 

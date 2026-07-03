@@ -32,8 +32,14 @@ class BuiltinDiarizer(Diarizer):
             run_opts=run_opts,
         )
 
-    def diarize(self, audio: np.ndarray, num_speakers: int | None = None) -> list[SpeakerTurn]:
-        speech = detect_speech(audio)
+    def diarize(
+        self,
+        audio: np.ndarray,
+        num_speakers: int | None = None,
+        speech: list[tuple[float, float]] | None = None,
+    ) -> list[SpeakerTurn]:
+        if speech is None:
+            speech = detect_speech(audio)
         if not speech:
             return []
 
@@ -67,7 +73,6 @@ class BuiltinDiarizer(Diarizer):
     @torch.inference_mode()
     def _embed(self, audio: np.ndarray, windows: list[tuple[float, float]]) -> np.ndarray:
         embs = []
-        batch, max_len = [], 0
         spans = []
         for start, end in windows:
             i0, i1 = int(start * SAMPLE_RATE), int(end * SAMPLE_RATE)

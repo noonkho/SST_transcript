@@ -6,7 +6,6 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 
 /* Current transcript being shown/edited */
 const current = { jobId: null, filename: "", result: null, editingIdx: null, loop: null };
-let speakerColors = {};
 let watchingJobId = null;
 
 /* ---------------- tabs ---------------- */
@@ -32,8 +31,6 @@ async function refreshStatus() {
     $("#d-device").textContent = s.device_description;
     $("#d-stt").textContent = s.stt_loaded || "not loaded yet";
     $("#d-diar").textContent = s.diarization_loaded || "not loaded yet";
-    $("#dash-attribution").style.display =
-      s.diarization_loaded === "pyannote/speaker-diarization-community-1" ? "block" : "none";
     $("#ffmpeg-warning").style.display = s.ffmpeg ? "none" : "block";
     $("#token-state").textContent = s.config.has_hf_token
       ? "✓ A token is saved." : "No token saved yet.";
@@ -145,9 +142,23 @@ function ts(sec) {
   return (h ? h + ":" : "") + String(m).padStart(2, "0") + ":" + String(s).padStart(4, "0");
 }
 
+/* Speaker colours: stable hash of the name, overridable per speaker (10-colour
+   palette, persisted with the transcript). */
+const PALETTE = 10;
+
+function hashColor(name) {
+  let h = 5381;
+  for (const ch of name) h = ((h * 33) ^ ch.codePointAt(0)) >>> 0;
+  return h % PALETTE;
+}
+
+function colorIdx(speaker) {
+  const custom = (current.result && current.result.speaker_colors) || {};
+  return speaker in custom ? custom[speaker] : hashColor(speaker);
+}
+
 function speakerClass(speaker) {
-  if (!(speaker in speakerColors)) speakerColors[speaker] = Object.keys(speakerColors).length % 6;
-  return "spk-" + speakerColors[speaker];
+  return "spk-" + colorIdx(speaker);
 }
 
 function isCJK(ch) {
@@ -173,7 +184,6 @@ function showResult(job) {
   current.result = job.result;
   current.editingIdx = null;
   current.loop = null;
-  speakerColors = {};
   $("#result-card").classList.remove("hidden");
   $("#result-title").textContent = job.filename;
   const r = job.result;
@@ -202,34 +212,66 @@ function renderSpeakerBar() {
   if (!speakers.length) return;
   const label = document.createElement("span");
   label.className = "bar-label";
-  label.textContent = "Speakers (click to rename):";
+  label.textContent = "Speakers (click to rename / recolour):";
   bar.appendChild(label);
   for (const spk of speakers) {
     const chip = document.createElement("span");
     chip.className = "speaker-chip " + speakerClass(spk);
     chip.textContent = spk;
-    chip.title = "Rename this speaker everywhere";
-    chip.addEventListener("click", () => {
-      const input = document.createElement("input");
-      input.value = spk;
-      bar.replaceChild(input, chip);
-      input.focus(); input.select();
-      const commit = async () => {
-        const name = input.value.trim();
-        if (name && name !== spk) {
-          current.result.segments.forEach((s) => { if (s.speaker === spk) s.speaker = name; });
-          await saveResult();
-        }
-        renderSpeakerBar(); renderSegments();
-      };
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") { e.preventDefault(); commit(); }
-        if (e.key === "Escape") { renderSpeakerBar(); }
-      });
-      input.addEventListener("blur", commit);
-    });
+    chip.title = "Rename this speaker or change its colour";
+    chip.addEventListener("click", () => openSpeakerPopover(bar, chip, spk));
     bar.appendChild(chip);
   }
+}
+
+function openSpeakerPopover(bar, chip, spk) {
+  const pop = document.createElement("span");
+  pop.className = "spk-popover";
+  let chosen = colorIdx(spk);
+
+  const input = document.createElement("input");
+  input.value = spk;
+
+  const swatches = document.createElement("span");
+  swatches.className = "swatches";
+  for (let i = 0; i < PALETTE; i++) {
+    const sw = document.createElement("button");
+    sw.className = `swatch swatch-${i}` + (i === chosen ? " active" : "");
+    sw.title = "Colour " + (i + 1);
+    sw.addEventListener("click", () => {
+      chosen = i;
+      swatches.querySelectorAll(".swatch").forEach((b, j) => b.classList.toggle("active", j === i));
+    });
+    swatches.appendChild(sw);
+  }
+
+  const ok = document.createElement("button");
+  ok.className = "icon-btn"; ok.textContent = "✓";
+  const cancel = document.createElement("button");
+  cancel.className = "icon-btn"; cancel.textContent = "✕";
+
+  const commit = async () => {
+    const name = input.value.trim() || spk;
+    if (name !== spk) {
+      current.result.segments.forEach((s) => { if (s.speaker === spk) s.speaker = name; });
+    }
+    const colors = { ...(current.result.speaker_colors || {}) };
+    delete colors[spk];
+    colors[name] = chosen;
+    current.result.speaker_colors = colors;
+    await saveResult();
+    renderSpeakerBar(); renderSegments();
+  };
+  ok.addEventListener("click", commit);
+  cancel.addEventListener("click", () => renderSpeakerBar());
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); commit(); }
+    if (e.key === "Escape") renderSpeakerBar();
+  });
+
+  pop.append(input, swatches, ok, cancel);
+  bar.replaceChild(pop, chip);
+  input.focus(); input.select();
 }
 
 /* ---------- segment list ---------- */
@@ -300,6 +342,12 @@ function enterEdit(idx) {
 }
 
 function exitEdit() {
+  // Cancelling the edit of a line with no text (e.g. a freshly added line)
+  // removes it instead of leaving an empty line behind.
+  const idx = current.editingIdx;
+  if (idx !== null && current.result.segments[idx] && !current.result.segments[idx].text.trim()) {
+    current.result.segments.splice(idx, 1);
+  }
   current.editingIdx = null;
   current.loop = null;
   renderSegments();
@@ -313,6 +361,7 @@ function commitEdit(rerender = true) {
   const seg = current.result.segments[idx];
   if (ta) seg.text = ta.value.trim();
   if (sel && sel.value !== "__new__") seg.speaker = sel.value;
+  if (!seg.text) current.result.segments.splice(idx, 1);  // saving an empty line deletes it
   current.editingIdx = null;
   current.loop = null;
   saveResult();
@@ -448,7 +497,10 @@ async function saveResult() {
   if (!current.jobId || !current.result) return;
   const resp = await fetch(`/api/jobs/${current.jobId}/result`, {
     method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ segments: current.result.segments }),
+    body: JSON.stringify({
+      segments: current.result.segments,
+      speaker_colors: current.result.speaker_colors || {},
+    }),
   });
   if (resp.ok) {
     const data = await resp.json();
@@ -497,8 +549,16 @@ async function refreshJobs() {
       btn.addEventListener("click", async (e) => {
         e.stopPropagation();
         if (!confirm(`Delete "${job.filename}" (audio + transcript)?`)) return;
-        await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
-        if (current.jobId === job.id) { $("#result-card").classList.add("hidden"); current.jobId = null; }
+        const resp = await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          alert("Could not delete: " + (err.detail || resp.statusText));
+        } else if (current.jobId === job.id) {
+          player.pause();
+          player.removeAttribute("src");
+          $("#result-card").classList.add("hidden");
+          current.jobId = null;
+        }
         refreshJobs();
       });
       actions.appendChild(btn);
@@ -542,7 +602,7 @@ function renderSelectors(data) {
     const el = $(sel);
     const prev = el.value;
     el.innerHTML = "";
-    const available = entries.filter((e) => e.downloaded);
+    const available = entries.filter((e) => e.downloaded && e.engine !== "unknown");
     if (!available.length) {
       el.innerHTML = '<option value="">— download a model first —</option>';
       return;
@@ -585,7 +645,9 @@ function renderCatalog(container, entries) {
       action = `<div class="dl-error">${m.download.error}</div>
                 <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
     } else if (m.downloaded) {
-      action = "";
+      action = (m.loaded || m.selected)
+        ? `<span class="hint" style="margin:0">in use</span>`
+        : `<button class="btn danger small" data-rm-repo="${m.repo_id}">Remove</button>`;
     } else {
       action = `<button class="btn primary" data-dl-repo="${m.repo_id}">Download ${m.size}</button>`;
     }
@@ -615,6 +677,22 @@ function renderCatalog(container, entries) {
       refreshModels();
     });
   });
+  container.querySelectorAll("[data-rm-repo]").forEach((btn) => {
+    btn.addEventListener("click", () => removeModel(btn.dataset.rmRepo));
+  });
+}
+
+async function removeModel(repoId) {
+  if (!confirm(`Remove "${repoId}" from local storage? You can re-download it later.`)) return;
+  const resp = await fetch("/api/models/remove", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo_id: repoId }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert("Could not remove: " + (err.detail || resp.statusText));
+  }
+  refreshModels();
 }
 
 $("#apply-models").addEventListener("click", async () => {
@@ -645,7 +723,7 @@ async function hfSearch() {
     row.className = "model-row";
     const compat = m.compatible
       ? '<span class="badge ok">compatible</span>'
-      : '<span class="badge gated">unsupported architecture</span>';
+      : '<span class="badge gated" title="This repo is in a format for another runtime (MLX, GGUF, CTranslate2, ONNX…) or an unsupported architecture. Look for the standard PyTorch version of the same model.">unsupported format</span>';
     row.innerHTML = `
       <div class="model-info">
         <div class="model-name">${m.repo_id} ${compat} ${m.gated ? '<span class="badge gated">gated</span>' : ""}</div>
@@ -653,7 +731,7 @@ async function hfSearch() {
           check the model page for its license before commercial use</div>
       </div>
       <div class="model-dl">
-        ${m.downloaded ? '<span class="badge ok">downloaded</span>'
+        ${m.downloaded ? `<button class="btn danger small" data-rm-repo="${m.repo_id}">Remove</button>`
           : m.compatible ? `<button class="btn primary" data-dl-repo="${m.repo_id}">Download</button>` : ""}
       </div>`;
     const btn = row.querySelector("[data-dl-repo]");
@@ -663,7 +741,10 @@ async function hfSearch() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo_id: m.repo_id }),
       });
+      refreshModels();
     });
+    const rm = row.querySelector("[data-rm-repo]");
+    if (rm) rm.addEventListener("click", async () => { await removeModel(m.repo_id); hfSearch(); });
     box.appendChild(row);
   }
 }

@@ -32,12 +32,26 @@ class PyannoteDiarizer(Diarizer):
             )
         self.pipeline.to(torch.device(device))
 
-    def diarize(self, audio: np.ndarray, num_speakers: int | None = None) -> list[SpeakerTurn]:
+    def diarize(
+        self,
+        audio: np.ndarray,
+        num_speakers: int | None = None,
+        speech: list[tuple[float, float]] | None = None,  # unused; pyannote has its own VAD
+    ) -> list[SpeakerTurn]:
         waveform = torch.from_numpy(audio).unsqueeze(0)
         kwargs = {}
         if num_speakers:
             kwargs["num_speakers"] = num_speakers
-        annotation = self.pipeline({"waveform": waveform, "sample_rate": SAMPLE_RATE}, **kwargs)
+        output = self.pipeline({"waveform": waveform, "sample_rate": SAMPLE_RATE}, **kwargs)
+
+        # pyannote.audio 3.x returns an Annotation directly; 4.x (community-1)
+        # wraps it in a DiarizeOutput with a .speaker_diarization attribute.
+        annotation = getattr(output, "speaker_diarization", output)
+        if not hasattr(annotation, "itertracks"):
+            raise RuntimeError(
+                f"Unexpected diarization output type {type(output).__name__} — "
+                "this pyannote.audio version is not supported."
+            )
 
         # Normalize speaker names to SPEAKER_00.. ordered by first appearance.
         turns: list[SpeakerTurn] = []

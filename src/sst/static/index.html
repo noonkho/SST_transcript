@@ -96,6 +96,7 @@
         <audio id="player" controls preload="metadata"></audio>
         <div class="speaker-bar" id="speaker-bar"></div>
         <div class="edit-hint">▶ Click a line to play from there · ✏️ double-click a line to edit ·
+          🎨 click a speaker chip to rename it or change its colour ·
           in edit mode: <kbd>Enter</kbd> save · <kbd>Shift+Enter</kbd> split at cursor ·
           <kbd>⌫</kbd> at line start merges up · <kbd>Esc</kbd> cancel</div>
         <div class="segments" id="segments"></div>
@@ -119,14 +120,6 @@
       </div>
       <div class="card" id="ffmpeg-warning" style="display:none">
         <strong>⚠️ ffmpeg not found.</strong> Audio decoding needs ffmpeg — install with <code>brew install ffmpeg</code>.
-      </div>
-      <div class="card" id="dash-attribution" style="display:none">
-        <h2>Model credits</h2>
-        <p class="hint" style="margin-top:0">Speaker diarization by
-          <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank">“speaker-diarization-community-1”</a>
-          © <a href="https://www.pyannote.ai/" target="_blank">pyannoteAI</a>, licensed under
-          <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">CC BY 4.0</a>.
-          Used without modification. Keep this credit in products built on this service.</p>
       </div>
       <div class="card">
         <h2>API endpoints</h2>
@@ -202,18 +195,6 @@
           <button class="btn" id="save-device">Save</button>
         </div>
         <div class="hint">Changing device takes effect the next time models are loaded.</div>
-      </div>
-      <div class="card">
-        <h2>Credits &amp; licenses</h2>
-        <p class="hint" style="margin-top:0">
-          Speaker diarization (default): <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank">“speaker-diarization-community-1”</a>
-          © <a href="https://www.pyannote.ai/" target="_blank">pyannoteAI</a>, licensed under
-          <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank">CC BY 4.0</a> — used without modification.
-          If you ship a commercial product using it, include this credit in your product's documentation or about page.<br>
-          Other components: OpenAI Whisper (Apache-2.0) · Silero VAD (MIT) ·
-          SpeechBrain ECAPA-TDNN (Apache-2.0) · pyannote.audio library (MIT).
-          Each model's license is shown in the Models tab.
-        </p>
       </div>
       <div class="card">
         <h2>Job history</h2>
