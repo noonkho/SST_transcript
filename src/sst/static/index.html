@@ -128,6 +128,25 @@
         <strong>⚠️ ffmpeg not found.</strong> Audio decoding needs ffmpeg — install with <code>brew install ffmpeg</code>.
       </div>
       <div class="card">
+        <h2>Share access</h2>
+        <div class="share-row">
+          <span class="share-label">This computer</span>
+          <code id="share-local"></code>
+          <button class="icon-btn" data-copy-target="share-local" title="Copy">⧉</button>
+        </div>
+        <div id="share-lan-rows"></div>
+        <div class="share-row">
+          <span class="share-label">API base URL</span>
+          <code id="share-api"></code>
+          <button class="icon-btn" data-copy-target="share-api" title="Copy">⧉</button>
+        </div>
+        <div class="hint" id="share-auth-state"></div>
+        <div class="hint" id="share-curl" style="display:none">
+          <code id="share-curl-code"></code>
+          <button class="icon-btn" data-copy-target="share-curl-code" title="Copy">⧉</button>
+        </div>
+      </div>
+      <div class="card">
         <h2>API endpoints</h2>
         <div class="api-row"><code>POST /v1/audio/transcriptions</code><span>OpenAI-compatible transcription with diarization</span></div>
         <div class="api-row"><code>GET /v1/models</code><span>List downloaded models</span></div>
@@ -212,6 +231,37 @@
         </div>
         <div class="hint">Finished jobs (transcript + original audio) are kept on disk so playback and
           editing survive restarts. Oldest jobs beyond this limit are deleted automatically (3–20, default 5).</div>
+      </div>
+      <div class="card">
+        <h2>Access &amp; security</h2>
+        <label class="toggle-label">Require login for other devices
+          <input type="checkbox" id="auth-enabled" class="toggle">
+        </label>
+        <div class="hint">When on, devices other than this computer must enter the API
+          key (browser) or send it as a Bearer token (API). This machine (localhost) is
+          never asked.</div>
+        <div class="key-row" style="margin-top:14px">
+          <label style="flex:1">API key
+            <div class="key-input">
+              <input type="password" id="api-key" placeholder="set a key…">
+              <button class="icon-btn" id="key-reveal" title="Show/hide">👁</button>
+              <button class="icon-btn" id="key-regen" title="Generate a strong key">↻</button>
+              <button class="icon-btn" id="key-copy" title="Copy">⧉</button>
+            </div>
+          </label>
+          <button class="btn primary" id="save-key">Save</button>
+        </div>
+        <div class="hint" id="auth-state"></div>
+      </div>
+      <div class="card">
+        <h2>Server port</h2>
+        <div class="options-row">
+          <label>Port <input type="number" id="srv-port" min="1024" max="65535"></label>
+          <button class="btn" id="save-port">Save &amp; restart</button>
+        </div>
+        <div class="hint">Saving restarts the web server on the new port (models stay
+          loaded — no re-download). You'll be redirected; other devices must reconnect
+          to the new port. If a login is active it will be required again on the new port.</div>
       </div>
     </section>
   </main>

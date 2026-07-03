@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -12,6 +13,8 @@ DATA_DIR = Path(os.environ.get("SST_DATA_DIR", Path(__file__).resolve().parents[
 CONFIG_PATH = DATA_DIR / "config.json"
 
 _lock = threading.Lock()
+
+_API_KEY_RE = re.compile(r"^\S{4,}$")   # >=4 non-whitespace chars
 
 
 @dataclass
@@ -24,10 +27,16 @@ class AppConfig:
     port: int = 8756
     default_output_format: str = "json"
     max_jobs: int = 5  # finished jobs (and their audio) kept on disk; 3..20
+    auth_enabled: bool = False
+    api_key: str = ""            # >= 4 printable chars, no whitespace
     extra: dict = field(default_factory=dict)
 
     def clamped_max_jobs(self) -> int:
         return max(3, min(20, int(self.max_jobs or 5)))
+
+    @staticmethod
+    def valid_api_key(key: str) -> bool:
+        return bool(key) and bool(_API_KEY_RE.match(key)) and key.isprintable()
 
     def save(self) -> None:
         with _lock:

@@ -8,6 +8,14 @@ Three integration styles are shown:
   1. Plain `requests` (works from any language via HTTP)
   2. The official OpenAI Python SDK pointed at the local server
   3. Async job submission with live progress (what the web UI uses)
+
+If you've enabled login in Settings (Access & security), requests from other
+machines need the API key as a Bearer token, e.g.:
+
+    requests.post(url, ..., headers={"Authorization": "Bearer YOUR_KEY"})
+    OpenAI(base_url=f"{BASE_URL}/v1", api_key="YOUR_KEY")   # SDK sends the header for you
+
+Calls from localhost (this machine) are never challenged, even with login enabled.
 """
 
 from __future__ import annotations
@@ -47,6 +55,8 @@ def transcribe_simple(audio_path: str) -> dict:
 def transcribe_with_openai_sdk(audio_path: str):
     from openai import OpenAI
 
+    # api_key is ignored by the server unless login is enabled in Settings;
+    # if it is, pass your real key here (e.g. api_key="YOUR_KEY").
     client = OpenAI(base_url=f"{BASE_URL}/v1", api_key="not-needed-local")
     with open(audio_path, "rb") as f:
         return client.audio.transcriptions.create(

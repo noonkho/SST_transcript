@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -15,13 +16,31 @@ import urllib.parse
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import (
+    FileResponse,
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .audio import SUPPORTED_EXTENSIONS, ffmpeg_available
-from .config import config
+from .auth import (
+    COOKIE_NAME,
+    SESSION_TTL,
+    drop_session,
+    is_local,
+    key_ok,
+    login_rate_ok,
+    new_session,
+    record_fail,
+    session_valid,
+)
+from .config import AppConfig, config
 from .formats import FORMATTERS
 from .jobs import jobs
 from .manager import manager
@@ -63,6 +82,69 @@ app = FastAPI(
     version=__version__,
     lifespan=_lifespan,
 )
+
+
+# ------------------------------------------------------------------- auth
+# Allow-list of paths that never require auth, even when config.auth_enabled.
+PUBLIC_PREFIXES = ("/static/",)
+PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico"}
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    if not config.auth_enabled:
+        return await call_next(request)
+    path = request.url.path
+    if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+        return await call_next(request)
+    if is_local(request.client.host if request.client else None):
+        return await call_next(request)
+    # 1) API bearer key
+    authz = request.headers.get("authorization", "")
+    if authz.startswith("Bearer ") and key_ok(authz[7:]):
+        return await call_next(request)
+    # 2) browser session cookie
+    if session_valid(request.cookies.get(COOKIE_NAME)):
+        return await call_next(request)
+    # unauthenticated
+    accepts_html = "text/html" in request.headers.get("accept", "")
+    if accepts_html and request.method == "GET":
+        return RedirectResponse(f"/login?next={path}", status_code=303)
+    return JSONResponse({"detail": "authentication required"}, status_code=401,
+                        headers={"WWW-Authenticate": "Bearer"})
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return (STATIC_DIR / "login.html").read_text()
+
+
+@app.post("/login")
+def login(body: dict, request: Request):
+    ip = request.client.host if request.client else "?"
+    if not login_rate_ok(ip):
+        raise HTTPException(429, "Too many attempts. Wait a few minutes.")
+    if not key_ok(body.get("key", "")):
+        record_fail(ip)
+        raise HTTPException(401, "Wrong key")
+    token = new_session()
+    resp = JSONResponse({"ok": True})
+    resp.set_cookie(COOKIE_NAME, token, max_age=SESSION_TTL,
+                    httponly=True, samesite="lax")   # no Secure: LAN is http
+    return resp
+
+
+@app.post("/logout")
+def logout(request: Request):
+    drop_session(request.cookies.get(COOKIE_NAME))
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE_NAME)
+    return resp
+
+
+def _restart_web():
+    from . import __main__ as m
+    m.web.request_restart()
 
 
 # ------------------------------------------------------------------ helpers
@@ -184,6 +266,8 @@ def api_status():
             "has_hf_token": bool(config.hf_token),
             "port": config.port,
             "max_jobs": config.clamped_max_jobs(),
+            "auth_enabled": config.auth_enabled,
+            "has_api_key": bool(config.api_key),
         },
     }
 
@@ -298,6 +382,33 @@ def api_config(body: dict):
         except (TypeError, ValueError):
             raise HTTPException(400, "max_jobs must be a number between 3 and 20") from None
         jobs.enforce_limit()
+
+    # api_key
+    if "api_key" in body:
+        k = (body["api_key"] or "").strip()
+        if k and not AppConfig.valid_api_key(k):
+            raise HTTPException(400, "API key needs >=4 printable chars, no whitespace")
+        config.api_key = k
+
+    # auth_enabled
+    if "auth_enabled" in body:
+        want = bool(body["auth_enabled"])
+        if want and not config.api_key:
+            raise HTTPException(400, "Set an API key before enabling authentication")
+        config.auth_enabled = want
+
+    # port
+    restart_needed = False
+    if "port" in body:
+        try:
+            p = int(body["port"])
+            assert 1024 <= p <= 65535
+        except (TypeError, ValueError, AssertionError):
+            raise HTTPException(400, "Port must be 1024-65535") from None
+        if p != config.port:
+            config.port = p
+            restart_needed = True
+
     config.save()
     # Load when the selection changed OR when what's in memory differs from the
     # selection (e.g. a per-request model override loaded something else).
@@ -312,7 +423,52 @@ def api_config(body: dict):
             except Exception as exc:  # noqa: BLE001
                 log.warning("model load failed: %s", exc)
         threading.Thread(target=load, daemon=True).start()
+
+    if restart_needed:
+        # Delay so this HTTP response is flushed before the socket drops.
+        threading.Timer(0.4, _restart_web).start()
+        return {"ok": True, "restart": True, "port": config.port}
     return {"ok": True}
+
+
+@app.post("/api/config/regenerate-key")
+def regen_key():
+    import secrets
+    config.api_key = secrets.token_urlsafe(24)
+    config.save()
+    return {"api_key": config.api_key}
+
+
+# ------------------------------------------------------------------ network
+
+def _primary_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))          # no packet sent; picks default-route IP
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+@app.get("/api/network")
+def api_network():
+    host = socket.gethostname()
+    ips = set()
+    try:
+        ips.update(socket.gethostbyname_ex(host)[2])
+    except Exception:
+        pass
+    ips.add(_primary_ip())
+    ips = sorted(i for i in ips if not i.startswith("127."))
+    return {
+        "hostname": host,
+        "mdns": f"{host}.local" if not host.endswith(".local") else host,
+        "port": config.port,
+        "addresses": ips,
+        "auth_enabled": config.auth_enabled,
+    }
 
 
 # ------------------------------------------------------------------- jobs

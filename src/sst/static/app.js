@@ -16,14 +16,16 @@ $$(".nav-item").forEach((btn) => {
     btn.classList.add("active");
     $("#tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "models") refreshModels();
-    if (btn.dataset.tab === "dashboard") refreshStatus();
+    if (btn.dataset.tab === "dashboard") { refreshStatus(); refreshNetwork(); }
   });
 });
 
 /* ---------------- status ---------------- */
 async function refreshStatus() {
   try {
-    const s = await fetch("/api/status").then((r) => r.json());
+    const r0 = await fetch("/api/status");
+    if (r0.status === 401) { window.location.href = "/login?next=" + encodeURIComponent(location.pathname); return null; }
+    const s = await r0.json();
     $("#server-dot").className = "dot ok";
     $("#server-label").textContent = "Server running";
     $("#device-label").textContent = s.device_description;
@@ -35,6 +37,15 @@ async function refreshStatus() {
     $("#token-state").textContent = s.config.has_hf_token
       ? "✓ A token is saved." : "No token saved yet.";
     if (document.activeElement !== $("#max-jobs")) $("#max-jobs").value = s.config.max_jobs;
+    if (document.activeElement !== $("#auth-enabled")) $("#auth-enabled").checked = s.config.auth_enabled;
+    if (document.activeElement !== $("#srv-port")) $("#srv-port").value = s.config.port;
+    if (document.activeElement !== $("#api-key")) {
+      $("#api-key").value = "";
+      $("#api-key").placeholder = s.config.has_api_key ? "key is set — leave blank to keep it" : "set a key…";
+    }
+    $("#auth-state").textContent = s.config.has_api_key
+      ? (s.config.auth_enabled ? "✓ Login is required for other devices." : "A key is saved but login is off — this device and all others have full access.")
+      : "No key saved yet — set one before enabling login.";
     return s;
   } catch {
     $("#server-dot").className = "dot err";
@@ -840,9 +851,127 @@ $("#save-max-jobs").addEventListener("click", async () => {
   refreshJobs();
 });
 
+/* ---------------- access & security (API key + auth toggle) ---------------- */
+$("#key-reveal").addEventListener("click", () => {
+  const input = $("#api-key");
+  input.type = input.type === "password" ? "text" : "password";
+});
+$("#key-regen").addEventListener("click", async () => {
+  const resp = await fetch("/api/config/regenerate-key", { method: "POST" });
+  if (!resp.ok) { alert("Could not generate a key."); return; }
+  const data = await resp.json();
+  const input = $("#api-key");
+  input.type = "text";
+  input.value = data.api_key;
+  $("#auth-state").textContent = "New key generated — copy it now, then it will be hidden. Click Save if not already saved.";
+});
+$("#key-copy").addEventListener("click", async () => {
+  const input = $("#api-key");
+  if (!input.value) { alert("Nothing to copy — reveal or regenerate a key first."); return; }
+  await navigator.clipboard.writeText(input.value);
+});
+$("#save-key").addEventListener("click", async () => {
+  const value = $("#api-key").value;
+  if (!value) { refreshStatus(); return; }  // blank = keep existing key
+  const resp = await fetch("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ api_key: value, load_now: false }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert(err.detail || "Could not save key.");
+    return;
+  }
+  refreshStatus();
+});
+$("#auth-enabled").addEventListener("change", async (e) => {
+  const want = e.target.checked;
+  const resp = await fetch("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ auth_enabled: want, load_now: false }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert(err.detail || "Could not update.");
+    e.target.checked = !want;
+    return;
+  }
+  refreshStatus();
+});
+
+/* ---------------- server port ---------------- */
+$("#save-port").addEventListener("click", async () => {
+  const p = parseInt($("#srv-port").value, 10);
+  const resp = await fetch("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ port: p, load_now: false }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    alert(err.detail || "Could not change port.");
+    return;
+  }
+  const data = await resp.json();
+  if (data.restart) {
+    $("#save-port").textContent = "Restarting…";
+    setTimeout(() => {
+      const url = new URL(window.location.href);
+      url.port = String(data.port);
+      window.location.href = url.toString();
+    }, 1200);
+  }
+});
+
+/* ---------------- dashboard: share access ---------------- */
+$$("[data-copy-target]").forEach((btn) => {
+  btn.addEventListener("click", async () => {
+    const el = document.getElementById(btn.dataset.copyTarget);
+    if (el) await navigator.clipboard.writeText(el.textContent);
+  });
+});
+
+async function refreshNetwork() {
+  const data = await fetch("/api/network").then((r) => r.json()).catch(() => null);
+  if (!data) return;
+  $("#share-local").textContent = `http://localhost:${data.port}`;
+  $("#share-api").textContent = data.addresses.length
+    ? `http://${data.addresses[0]}:${data.port}/v1`
+    : `http://localhost:${data.port}/v1`;
+
+  const rows = $("#share-lan-rows");
+  rows.innerHTML = "";
+  const addRow = (label, url) => {
+    const div = document.createElement("div");
+    div.className = "share-row";
+    const id = "share-lan-" + Math.random().toString(36).slice(2);
+    div.innerHTML = `<span class="share-label">${label}</span><code id="${id}"></code>
+      <button class="icon-btn" data-copy-target="${id}" title="Copy">⧉</button>`;
+    div.querySelector("code").textContent = url;
+    rows.appendChild(div);
+    div.querySelector("[data-copy-target]").addEventListener("click", async () => {
+      await navigator.clipboard.writeText(url);
+    });
+  };
+  for (const ip of data.addresses) addRow("WiFi / Ethernet", `http://${ip}:${data.port}`);
+  if (data.mdns) addRow("mDNS (Apple/most OSes)", `http://${data.mdns}:${data.port}`);
+
+  if (data.auth_enabled) {
+    $("#share-auth-state").textContent = "🔒 Login required — share the API key separately.";
+    $("#share-curl").style.display = "";
+    const ip = data.addresses[0] || "localhost";
+    $("#share-curl-code").textContent =
+      `curl -H "Authorization: Bearer <key>" http://${ip}:${data.port}/v1/models`;
+  } else {
+    $("#share-auth-state").textContent =
+      "🔓 Open on the LAN — anyone who can reach this address can use it. Enable login in Settings to restrict.";
+    $("#share-curl").style.display = "none";
+  }
+}
+
 /* ---------------- init ---------------- */
 refreshStatus();
 refreshJobs();
 refreshModels();
+refreshNetwork();
 setInterval(refreshStatus, 10000);
 setInterval(refreshJobs, 8000);

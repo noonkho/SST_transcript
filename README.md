@@ -333,6 +333,33 @@ use it at `http://<this-machine>.local:8756`.
 
 ---
 
+## Network access & security
+
+- **Same machine:** `http://localhost:<port>`.
+- **Other devices on WiFi/Ethernet:** on the same router/subnet, open
+  `http://<LAN-IP>:<port>` (find the IP on the Dashboard's "Share access" card).
+  mDNS `http://<hostname>.local:<port>` works on Apple devices and most other OSes.
+  Wired vs wireless doesn't matter — both use the LAN IP.
+- **macOS firewall:** System Settings → Network → Firewall. Either keep it on and, on
+  first launch, click **Allow incoming connections** for the Python/uv process, or add
+  it under *Options…*. (The firewall filters by app, not port — allowing the process is
+  enough.) Windows: allow the app on Private networks. Linux ufw: `sudo ufw allow <port>/tcp`.
+- **Enable login:** Settings → Access & security → set an API key → toggle "Require
+  login for other devices" on. This machine (localhost) is never challenged.
+- **API with the key:**
+  ```bash
+  curl -H "Authorization: Bearer YOUR_KEY" http://<LAN-IP>:<port>/v1/models
+  ```
+  OpenAI SDK: `OpenAI(base_url="http://<LAN-IP>:<port>/v1", api_key="YOUR_KEY")` — the
+  SDK already sends the Bearer header, so no code change is needed beyond the key.
+  Browsers log in once at `/login`; the session cookie lasts 24h, then it's login again.
+- **Change port:** Settings → Server port → Save & restart. The web server rebinds
+  in-process — models already in memory stay loaded, no re-download or reload.
+- Note: LAN traffic is plain HTTP (fine inside a trusted network). For untrusted
+  networks, put Caddy/nginx in front for HTTPS — out of scope here.
+
+---
+
 ## How it works
 
 ```
@@ -361,6 +388,8 @@ Everything is configurable in the UI (Settings tab). State lives in `data/config
 | `device_override` | auto | Force `cuda` / `mps` / `cpu` |
 | `port` | `8756` | Server port |
 | `max_jobs` | `5` | Finished jobs kept on disk (3–20); oldest auto-deleted |
+| `auth_enabled` | `false` | Require an API key / browser login for non-localhost requests |
+| `api_key` | `""` | API key for the Bearer header / login page (never returned by the API — only a `has_api_key` flag) |
 
 Environment variables: `SST_DATA_DIR` (config/state location), `HF_HOME`
 (model cache location).
