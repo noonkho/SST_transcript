@@ -954,6 +954,9 @@ async function refreshNetwork() {
   };
   for (const ip of data.addresses) addRow("WiFi / Ethernet", `http://${ip}:${data.port}`);
   if (data.mdns) addRow("mDNS (Apple/most OSes)", `http://${data.mdns}:${data.port}`);
+  for (const ip of (data.vpn_addresses || [])) addRow("Tailscale / VPN", `http://${ip}:${data.port}`);
+  if (!data.addresses.length && !(data.vpn_addresses || []).length)
+    rows.innerHTML = '<div class="hint" style="margin:0">No network address detected — is this machine on WiFi/Ethernet?</div>';
 
   if (data.auth_enabled) {
     $("#share-auth-state").textContent = "🔒 Login required — share the API key separately.";

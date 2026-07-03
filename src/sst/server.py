@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import mimetypes
+import re
 import shutil
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -441,6 +444,9 @@ def regen_key():
 
 # ------------------------------------------------------------------ network
 
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")  # RFC 6598 — Tailscale & carrier NAT
+
+
 def _primary_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -452,21 +458,62 @@ def _primary_ip() -> str:
         s.close()
 
 
-@app.get("/api/network")
-def api_network():
-    host = socket.gethostname()
-    ips = set()
+def _all_ipv4() -> set[str]:
+    """Every IPv4 the host has, best-effort across macOS/Linux without extra deps."""
+    ips: set[str] = set()
+    for cmd in (["ip", "-o", "-4", "addr", "show"], ["ifconfig", "-a"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+        except Exception:
+            continue
+        if out:
+            # matches "inet 192.168.1.5" (mac/ip) and "inet addr:192.168.1.5" (old linux)
+            ips.update(re.findall(r"inet (?:addr:)?(\d+\.\d+\.\d+\.\d+)", out))
+            break
     try:
-        ips.update(socket.gethostbyname_ex(host)[2])
+        ips.update(socket.gethostbyname_ex(socket.gethostname())[2])
     except Exception:
         pass
     ips.add(_primary_ip())
-    ips = sorted(i for i in ips if not i.startswith("127."))
+    return ips
+
+
+def _classify_ip(ip: str) -> str | None:
+    """'lan' | 'vpn' | 'public' | None (loopback/link-local, skipped)."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if a.is_loopback or a.is_link_local or a.is_unspecified:
+        return None
+    if a in _CGNAT:
+        return "vpn"          # Tailscale etc — not reachable by ordinary LAN neighbours
+    if a.is_private:
+        return "lan"
+    return "public"
+
+
+@app.get("/api/network")
+def api_network():
+    host = socket.gethostname()
+    lan, vpn = [], []
+    for ip in _all_ipv4():
+        kind = _classify_ip(ip)
+        if kind == "lan":
+            lan.append(ip)
+        elif kind == "vpn":
+            vpn.append(ip)
+    lan.sort()
+    vpn.sort()
+    # Bonjour/mDNS uses the short hostname; a resolver may hand back an FQDN
+    # (e.g. a Tailscale ...ts.net name), so strip to the first label.
+    short = host.split(".")[0]
     return {
         "hostname": host,
-        "mdns": f"{host}.local" if not host.endswith(".local") else host,
+        "mdns": f"{short}.local" if short else None,
         "port": config.port,
-        "addresses": ips,
+        "addresses": lan,          # WiFi/Ethernet LAN — what neighbours use
+        "vpn_addresses": vpn,      # e.g. Tailscale, reachable only on the same tailnet
         "auth_enabled": config.auth_enabled,
     }
 
