@@ -26,7 +26,7 @@ from .formats import FORMATTERS
 from .jobs import jobs
 from .manager import manager
 from .pipeline import run_transcription
-from .registry import CATALOG, DIARIZATION_CATALOG, STT_CATALOG, find_entry
+from .registry import CATALOG, DIARIZATION_CATALOG, STT_CATALOG, classify_hf_model, find_entry
 
 log = logging.getLogger("sst.server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -198,6 +198,7 @@ def api_models():
         d["download"] = None if dl is None else {
             "status": dl.status, "progress": dl.progress,
             "downloaded_bytes": dl.downloaded_bytes, "total_bytes": dl.total_bytes,
+            "eta_seconds": dl.eta_seconds,
             "error": dl.error,
         }
         d["selected"] = repo_id in (config.stt_model, config.diarization_model)
@@ -205,8 +206,18 @@ def api_models():
         return d
 
     stt = [annotate(asdict(e), e.repo_id) for e in STT_CATALOG]
-    # Models added via Hugging Face search appear alongside the curated ones.
-    for custom in manager.custom_downloaded():
+    # Models added via Hugging Face search appear alongside the curated ones —
+    # including ones still downloading, so their progress is visible here too.
+    catalog_ids = {e.repo_id for e in STT_CATALOG} | {e.repo_id for e in DIARIZATION_CATALOG}
+    custom_repos = {c["repo_id"]: c for c in manager.custom_downloaded()}
+    for repo_id, dl in manager.downloads.items():
+        if repo_id not in catalog_ids and not repo_id.startswith("builtin/") and repo_id not in custom_repos:
+            custom_repos[repo_id] = {
+                "repo_id": repo_id,
+                "engine": classify_hf_model(repo_id, []),
+                "supported": classify_hf_model(repo_id, []) is not None,
+            }
+    for custom in custom_repos.values():
         stt.append(annotate({
             "repo_id": custom["repo_id"],
             "kind": "stt",

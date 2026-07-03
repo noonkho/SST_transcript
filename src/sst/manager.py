@@ -33,23 +33,43 @@ class DownloadState:
     progress: float = 0.0            # 0..1
     downloaded_bytes: int = 0
     total_bytes: int = 0
+    eta_seconds: float | None = None
     error: str = ""
     started_at: float = field(default_factory=time.time)
 
 
-class _ProgressTqdm(huggingface_hub.utils.tqdm):
-    """tqdm subclass that reports snapshot_download progress to a DownloadState."""
+def _repo_cache_dir(repo_id: str):
+    from pathlib import Path
+    return Path(huggingface_hub.constants.HF_HUB_CACHE) / f"models--{repo_id.replace('/', '--')}"
 
-    _state: DownloadState | None = None  # set per-download via closure class
 
-    def update(self, n=1):
-        super().update(n)
-        state = type(self)._state
-        # Only track the outer bytes-level bar (unit=B); ignore the file-count bar.
-        if state is not None and self.unit == "B" and self.total:
-            state.downloaded_bytes = int(self.n)
-            state.total_bytes = int(self.total)
-            state.progress = min(1.0, self.n / self.total)
+def _bytes_on_disk(repo_ids: list[str]) -> int:
+    """Bytes downloaded so far (blobs + partial .incomplete files)."""
+    total = 0
+    for repo_id in repo_ids:
+        blobs = _repo_cache_dir(repo_id) / "blobs"
+        if blobs.exists():
+            total += sum(f.stat().st_size for f in blobs.iterdir() if f.is_file())
+    return total
+
+
+def _watch_download(state: DownloadState, targets: list[str]) -> None:
+    """Filesystem-based progress: independent of the hub's download backend."""
+    prev_bytes = _bytes_on_disk(targets)
+    prev_t = time.time()
+    rate = 0.0
+    while state.status == "downloading":
+        time.sleep(1.0)
+        now_bytes = _bytes_on_disk(targets)
+        now_t = time.time()
+        delta = (now_bytes - prev_bytes) / max(now_t - prev_t, 1e-3)
+        rate = 0.7 * rate + 0.3 * max(delta, 0.0)  # smoothed bytes/sec
+        prev_bytes, prev_t = now_bytes, now_t
+        state.downloaded_bytes = now_bytes
+        if state.total_bytes:
+            state.progress = min(0.999, now_bytes / state.total_bytes)
+            if rate > 1024:
+                state.eta_seconds = max(0.0, (state.total_bytes - now_bytes) / rate)
 
 
 class ModelManager:
@@ -111,28 +131,41 @@ class ModelManager:
         return state
 
     def _download(self, repo_id: str, state: DownloadState) -> None:
+        import fnmatch
+
         targets = BUILTIN_DIARIZATION_DEPS if repo_id == "builtin/vad-ecapa-clustering" else [repo_id]
         try:
             api = HfApi(token=config.hf_token or None)
+            plans: list[tuple[str, list[str]]] = []  # (target, ignore_patterns)
             for target in targets:
                 ignore = list(IGNORE_ALWAYS)
                 try:
-                    files = api.list_repo_files(target)
+                    info = api.model_info(target, files_metadata=True)
+                    files = [s.rfilename for s in info.siblings]
                     if any(f.endswith(".safetensors") for f in files):
                         # safetensors present — skip the duplicate PyTorch .bin weights
                         ignore += ["*.bin", "pytorch_model*"]
+                    state.total_bytes += sum(
+                        s.size or 0 for s in info.siblings
+                        if not any(fnmatch.fnmatch(s.rfilename, p) for p in ignore)
+                    )
                 except Exception:
                     pass  # offline or transient: download everything except IGNORE_ALWAYS
-                tqdm_cls = type("Bar", (_ProgressTqdm,), {"_state": state})
+                plans.append((target, ignore))
+
+            watcher = threading.Thread(target=_watch_download, args=(state, targets), daemon=True)
+            watcher.start()
+            for target, ignore in plans:
                 snapshot_download(
                     target,
                     token=config.hf_token or None,
                     ignore_patterns=ignore,
-                    tqdm_class=tqdm_cls,
                 )
                 self._mark_complete(target)
             self._mark_complete(repo_id)
+            state.downloaded_bytes = max(state.downloaded_bytes, state.total_bytes)
             state.progress = 1.0
+            state.eta_seconds = 0.0
             state.status = "done"
             # If this is one of the configured models, load it right away.
             if repo_id in (config.stt_model, config.diarization_model):

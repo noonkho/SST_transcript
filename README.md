@@ -82,6 +82,11 @@ Click **Download** and the model appears in the *Speech-to-text models* list
 (marked "Added from Hugging Face search") and in the model selector, like any
 built-in entry. Check the model's page for its license before commercial use.
 
+While a model downloads, both its search row and its entry in the models list
+show **live progress** — percentage, downloaded/total size, and estimated time
+remaining (e.g. `12% · 380 MB / 3.0 GB · ~25m left`). If the server restarts
+mid-download, click **Download** again — it resumes from where it stopped.
+
 Every downloaded model — curated or custom — has a **Remove** button that deletes
 its files from local storage (you can re-download any time). The model currently
 selected/loaded can't be removed; switch to another model first.

@@ -590,11 +590,38 @@ async function refreshModels() {
   renderCatalog($("#stt-catalog"), data.stt);
   renderCatalog($("#diar-catalog"), data.diarization);
   renderSelectors(data);
+  syncSearchRows(data.stt);
 
   const busy = [...data.stt, ...data.diarization].some(
     (m) => m.download && m.download.status === "downloading");
   clearTimeout(modelsPollTimer);
   if (busy) modelsPollTimer = setTimeout(refreshModels, 1200);
+}
+
+/* Keep Hugging Face search rows in sync with download progress. */
+function syncSearchRows(sttEntries) {
+  $$("#hf-results [data-search-repo]").forEach((cell) => {
+    const m = sttEntries.find((e) => e.repo_id === cell.dataset.searchRepo);
+    if (!m) return;
+    if (m.download && m.download.status === "downloading") {
+      cell.innerHTML = `<div class="dl-progress">${dlProgressText(m.download)}</div>`;
+    } else if (m.download && m.download.status === "error") {
+      cell.innerHTML = `<div class="dl-error">${m.download.error}</div>
+                        <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
+      cell.querySelector("[data-dl-repo]").addEventListener("click", async (e) => {
+        e.target.disabled = true;
+        await fetch("/api/models/download", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ repo_id: m.repo_id }),
+        });
+        refreshModels();
+      });
+    } else if (m.downloaded) {
+      cell.innerHTML = `<span class="badge ok">downloaded</span>
+                        <button class="btn danger small" data-rm-repo="${m.repo_id}">Remove</button>`;
+      cell.querySelector("[data-rm-repo]").addEventListener("click", () => removeModel(m.repo_id).then(refreshModels));
+    }
+  });
 }
 
 function renderSelectors(data) {
@@ -620,11 +647,18 @@ function renderSelectors(data) {
 }
 
 function fmtBytes(n) {
-  if (!n) return "";
+  if (!n) return "0 MB";
   const units = ["B", "KB", "MB", "GB"];
   let i = 0;
   while (n >= 1024 && i < 3) { n /= 1024; i++; }
   return n.toFixed(1) + " " + units[i];
+}
+
+function dlProgressText(dl) {
+  if (!dl.total_bytes) return "downloading… " + fmtBytes(dl.downloaded_bytes);
+  const pct = Math.round(dl.progress * 100);
+  const eta = dl.eta_seconds != null && dl.eta_seconds > 1 ? ` · ~${fmtDur(dl.eta_seconds)} left` : "";
+  return `${pct}% · ${fmtBytes(dl.downloaded_bytes)} / ${fmtBytes(dl.total_bytes)}${eta}`;
 }
 
 function renderCatalog(container, entries) {
@@ -639,8 +673,7 @@ function renderCatalog(container, entries) {
     ].join("");
     let action;
     if (m.download && m.download.status === "downloading") {
-      const pct = Math.round(m.download.progress * 100);
-      action = `<div class="dl-progress">${pct}% · ${fmtBytes(m.download.downloaded_bytes)} / ${fmtBytes(m.download.total_bytes)}</div>`;
+      action = `<div class="dl-progress">${dlProgressText(m.download)}</div>`;
     } else if (m.download && m.download.status === "error") {
       action = `<div class="dl-error">${m.download.error}</div>
                 <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
@@ -730,18 +763,18 @@ async function hfSearch() {
         <div class="model-desc">${(m.downloads || 0).toLocaleString()} downloads · ${(m.likes || 0)} likes ·
           check the model page for its license before commercial use</div>
       </div>
-      <div class="model-dl">
+      <div class="model-dl" data-search-repo="${m.repo_id}">
         ${m.downloaded ? `<button class="btn danger small" data-rm-repo="${m.repo_id}">Remove</button>`
           : m.compatible ? `<button class="btn primary" data-dl-repo="${m.repo_id}">Download</button>` : ""}
       </div>`;
     const btn = row.querySelector("[data-dl-repo]");
     if (btn) btn.addEventListener("click", async () => {
-      btn.disabled = true; btn.textContent = "Downloading…";
+      btn.disabled = true; btn.textContent = "Starting…";
       await fetch("/api/models/download", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ repo_id: m.repo_id }),
       });
-      refreshModels();
+      refreshModels();  // the models poll now drives live progress in this row
     });
     const rm = row.querySelector("[data-rm-repo]");
     if (rm) rm.addEventListener("click", async () => { await removeModel(m.repo_id); hfSearch(); });
