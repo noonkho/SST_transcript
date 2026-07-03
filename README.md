@@ -189,6 +189,12 @@ speech explicitly). For meetings where people mostly take turns, it performs wel
 
 ## Using the web UI
 
+The interface is **responsive** and adapts to the screen: on wide monitors and
+TVs the Transcribe tab uses a two-column layout (transcription on the left,
+**Recent jobs** always visible on the right) and the container widens to fill
+the space; on tablets and phones the sidebar becomes a top bar and everything
+stacks into a single, touch-friendly column.
+
 ### Karaoke playback
 
 After a transcription finishes (or when you open a job from **Recent jobs**), the

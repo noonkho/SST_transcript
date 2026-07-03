@@ -68,8 +68,15 @@ nav { display: flex; flex-direction: column; gap: 2px; }
 .dot.err { background: var(--red); }
 
 /* ---------- content ---------- */
-.content { flex: 1; padding: 32px 40px 60px; max-width: 980px; }
-h1 { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 18px; }
+.content {
+  flex: 1 1 auto;
+  min-width: 0;                 /* let flex child shrink instead of overflowing */
+  width: 100%;
+  max-width: 1680px;
+  margin-inline: auto;          /* centre within the track on very wide screens */
+  padding: clamp(20px, 2.2vw, 44px) clamp(16px, 2.6vw, 48px) 64px;
+}
+h1 { font-size: clamp(22px, 2vw, 28px); font-weight: 700; letter-spacing: -0.5px; margin-bottom: 18px; }
 h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
 .tab { display: none; }
 .tab.active { display: block; }
@@ -79,8 +86,20 @@ h2 { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
   padding: 20px; margin-bottom: 16px;
 }
 .hidden { display: none !important; }
-.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 16px; }
+/* stat cards flow into as many columns as fit (4 → 2 → 1) */
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 16px; }
 .stat-card { margin-bottom: 0; }
+
+/* ---------- transcribe: main flow + always-visible jobs sidebar ---------- */
+.transcribe-grid { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; }
+.transcribe-main { min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+.transcribe-main > .card { margin-bottom: 0; }
+.transcribe-side { min-width: 0; }
+.transcribe-side > .card { margin-bottom: 0; }
+@media (min-width: 1100px) {
+  .transcribe-grid { grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 400px); }
+  .transcribe-side > .card { position: sticky; top: 20px; }
+}
 .stat-label { font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
 .stat-value { font-size: 16px; font-weight: 600; word-break: break-all; }
 .hint { font-size: 12px; color: var(--text-2); margin-top: 10px; line-height: 1.5; }
@@ -107,13 +126,16 @@ code {
 
 /* ---------- forms ---------- */
 .options-row { display: flex; gap: 18px; align-items: flex-end; margin-top: 16px; flex-wrap: wrap; }
-label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-2); font-weight: 500; }
+label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-2); font-weight: 500; min-width: 0; max-width: 100%; }
 select, input[type="search"], input[type="password"], input[type="text"] {
   font-family: inherit; font-size: 13.5px; color: var(--text);
   background: var(--bg); border: 1px solid var(--border);
-  border-radius: 8px; padding: 7px 10px; min-width: 160px;
+  border-radius: 8px; padding: 7px 10px; min-width: 160px; max-width: 100%;
   outline: none;
 }
+/* model selectors can list very long custom repo ids — cap them so the
+   native <select> truncates instead of stretching the layout */
+#sel-stt, #sel-diar { min-width: 0; width: 100%; max-width: 340px; }
 select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .toggle-label { flex-direction: row; align-items: center; gap: 8px; padding-bottom: 8px; }
 .toggle { appearance: none; width: 40px; height: 24px; border-radius: 12px; background: rgba(120,120,128,0.25); position: relative; cursor: pointer; transition: background 0.2s; }
@@ -214,7 +236,7 @@ input[type="number"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px 
 /* ---------- results ---------- */
 .result-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px; flex-wrap: wrap; gap: 10px; }
 .result-meta { font-size: 12px; color: var(--text-2); margin-top: 3px; }
-.segments { display: flex; flex-direction: column; gap: 10px; max-height: 480px; overflow-y: auto; }
+.segments { display: flex; flex-direction: column; gap: 10px; max-height: min(62vh, 680px); overflow-y: auto; }
 .segment { display: flex; gap: 12px; align-items: flex-start; }
 .seg-time { font-family: "SF Mono", ui-monospace, monospace; font-size: 11px; color: var(--text-2); white-space: nowrap; padding-top: 5px; min-width: 118px; flex-shrink: 0; }
 .speaker-chip {
@@ -267,25 +289,53 @@ input[type="number"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px 
 .job-sub { font-size: 12px; color: var(--text-2); }
 .empty { color: var(--text-2); font-size: 13px; padding: 8px 0; }
 
-.model-row { display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border); align-items: center; }
+.model-row { display: flex; gap: 14px; padding: 14px 0; border-bottom: 1px solid var(--border); align-items: center; flex-wrap: wrap; }
 .model-row:last-child { border-bottom: none; }
-.model-info { flex: 1; min-width: 0; }
+.model-info { flex: 1 1 260px; min-width: 0; }
 .model-name { font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .model-desc { font-size: 12.5px; color: var(--text-2); margin-top: 3px; line-height: 1.5; }
 .badge { font-size: 10.5px; font-weight: 700; padding: 2px 8px; border-radius: 20px; text-transform: uppercase; letter-spacing: 0.3px; }
 .badge.ok { background: rgba(52,199,89,0.15); color: #24a148; }
 .badge.gated { background: rgba(255,149,0,0.15); color: #d97b00; }
 .badge.loaded { background: var(--accent-soft); color: var(--accent); }
-.model-dl { min-width: 140px; text-align: right; }
+.model-dl { min-width: 140px; text-align: right; margin-left: auto; }
 .dl-progress { font-size: 12px; color: var(--accent); font-weight: 600; }
-.dl-error { font-size: 11.5px; color: var(--red); max-width: 220px; }
+.dl-error { font-size: 11.5px; color: var(--red); max-width: 220px; overflow-wrap: anywhere; }
 
-@media (max-width: 760px) {
+/* ---------- large screens / TV: widen container, scale text up ---------- */
+@media (min-width: 1800px) {
+  body { font-size: 15px; }
+  .content { max-width: 1820px; }
+}
+@media (min-width: 2400px) {
+  body { font-size: 16px; }
+  .content { max-width: 2100px; }
+  .card { padding: 24px; }
+}
+
+/* ---------- tablet / phone: sidebar becomes a sticky top bar ---------- */
+@media (max-width: 840px) {
   .window { flex-direction: column; }
-  .sidebar { width: 100%; height: auto; position: static; flex-direction: row; align-items: center; padding: 10px; }
-  .app-title { padding: 0 10px 0 0; }
-  nav { flex-direction: row; }
+  .sidebar {
+    width: 100%; height: auto; position: sticky; top: 0; z-index: 30;
+    flex-direction: row; align-items: center; gap: 6px;
+    padding: 8px 12px; overflow-x: auto;
+  }
+  .app-title { padding: 0 8px 0 0; flex-shrink: 0; }
+  nav { flex-direction: row; gap: 4px; }
+  .nav-item { white-space: nowrap; padding: 8px 12px; }
   .sidebar-footer { display: none; }
-  .content { padding: 20px 16px; }
-  .grid-2 { grid-template-columns: 1fr; }
+  .transcribe-grid { grid-template-columns: 1fr; }
+  .transcribe-side > .card { position: static; }
+}
+
+/* ---------- small phones: tighten spacing, keep touch targets ---------- */
+@media (max-width: 480px) {
+  .card { padding: 16px; }
+  .options-row { gap: 12px; }
+  select, input[type="search"], input[type="password"], input[type="text"] { min-width: 130px; }
+  .result-head { flex-direction: column; }
+  .btn-group { width: 100%; }
+  .seg-time { min-width: 0; }
+  .segment { flex-wrap: wrap; }
 }
