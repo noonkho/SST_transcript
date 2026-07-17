@@ -13,7 +13,7 @@ OPENAI_FORMATS = ("json", "verbose_json", "text", "srt", "vtt")
 # Advertised guidance for clients, in seconds. NOT enforced: the pipeline
 # chunks on silence and handles multi-hour audio. It tells callers what a
 # comfortable single request looks like.
-MAX_AUDIO_SECONDS = 3600
+MAX_AUDIO_SECONDS = 43200  # 12 h
 
 # OpenAI error `type` values this service emits.
 TYPE_INVALID_REQUEST = "invalid_request_error"

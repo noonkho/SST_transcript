@@ -157,7 +157,7 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
 # ------------------------------------------------------------------- auth
 # Allow-list of paths that never require auth, even when config.auth_enabled.
 PUBLIC_PREFIXES = ("/static/",)
-PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico"}
+PUBLIC_PATHS = {"/login", "/logout", "/favicon.ico", "/health"}
 
 
 @app.middleware("http")
@@ -255,6 +255,40 @@ def _attachment_headers(filename: str) -> dict:
     return {
         "Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
     }
+
+
+# ----------------------------------------------------------------- health
+
+@app.get("/health")
+def health():
+    """Liveness/readiness probe. No auth, no inference, no disk — reads the
+    manager's in-memory state only, so it answers in well under 100 ms.
+
+    ready    = the configured STT model is loaded (transcription can serve).
+    degraded = it isn't (still starting, downloading, or failed to load).
+    A missing diarizer is a warning, not a failure: transcription still works.
+    """
+    stt_loaded = manager.stt_repo
+    diar_loaded = manager.diar_repo
+
+    if not stt_loaded:
+        return JSONResponse(status_code=503, content={
+            "status": "degraded",
+            "version": __version__,
+            "error": f"Required model {config.stt_model} not loaded or accessible",
+        })
+
+    body: dict = {
+        "status": "ready",
+        "version": __version__,
+        "models_loaded": [stt_loaded] + ([diar_loaded] if diar_loaded else []),
+    }
+    if not diar_loaded:
+        body["warnings"] = [{
+            "code": "model_not_loaded",
+            "model": config.diarization_model,
+        }]
+    return body
 
 
 # ------------------------------------------------------- OpenAI-compatible
@@ -533,6 +567,16 @@ def regen_key():
     import secrets
     config.api_key = secrets.token_urlsafe(24)
     config.save()
+    return {"api_key": config.api_key}
+
+
+@app.get("/api/config/api-key")
+def reveal_key():
+    """Return the saved key so Settings' 👁 button can show it.
+
+    Reachable only by someone already past the auth gate — i.e. this machine
+    (localhost) or a caller who already holds the key or a session.
+    """
     return {"api_key": config.api_key}
 
 

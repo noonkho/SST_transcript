@@ -47,7 +47,13 @@ def to_docx(result: dict) -> bytes:
     """Word document with a 6-column table: ID, Start, End, Person, ':', Text."""
     from docx import Document
     from docx.enum.table import WD_TABLE_ALIGNMENT
-    from docx.shared import Pt
+    from docx.shared import Cm, Pt
+
+    # ID, Start, End, Person, ':', Transcript — the ':' column is a separator,
+    # so keep it hairline; the transcript takes the remaining width.
+    _DOCX_COL_WIDTHS = {
+        0: Cm(1.0), 1: Cm(2.2), 2: Cm(2.2), 3: Cm(3.0), 4: Cm(0.5), 5: Cm(8.1),
+    }
 
     doc = Document()
     doc.add_heading("Transcript", level=1)
@@ -74,6 +80,14 @@ def to_docx(result: dict) -> bytes:
         row[3].text = seg["speaker"]
         row[4].text = ":"
         row[5].text = seg["text"]
+
+    # Word only honours column widths when autofit is off and the width is set
+    # on every cell of the column, not just on the column object.
+    table.autofit = False
+    for idx, width in _DOCX_COL_WIDTHS.items():
+        table.columns[idx].width = width
+        for row in table.rows:
+            row.cells[idx].width = width
 
     buf = io.BytesIO()
     doc.save(buf)

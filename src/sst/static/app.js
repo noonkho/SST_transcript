@@ -39,9 +39,11 @@ async function refreshStatus() {
     if (document.activeElement !== $("#max-jobs")) $("#max-jobs").value = s.config.max_jobs;
     if (document.activeElement !== $("#auth-enabled")) $("#auth-enabled").checked = s.config.auth_enabled;
     if (document.activeElement !== $("#srv-port")) $("#srv-port").value = s.config.port;
-    if (document.activeElement !== $("#api-key")) {
-      $("#api-key").value = "";
-      $("#api-key").placeholder = s.config.has_api_key ? "key is set — leave blank to keep it" : "set a key…";
+    // Don't wipe what's in the box — the user may be mid-edit, or revealed the
+    // saved key to read/copy it. Only the placeholder reflects server state.
+    if (!$("#api-key").value) {
+      $("#api-key").placeholder = s.config.has_api_key
+        ? "key is set — click 👁 to reveal" : "set a key…";
     }
     $("#auth-state").textContent = s.config.has_api_key
       ? (s.config.auth_enabled ? "✓ Login is required for other devices." : "A key is saved but login is off — this device and all others have full access.")
@@ -852,9 +854,15 @@ $("#save-max-jobs").addEventListener("click", async () => {
 });
 
 /* ---------------- access & security (API key + auth toggle) ---------------- */
-$("#key-reveal").addEventListener("click", () => {
+$("#key-reveal").addEventListener("click", async () => {
   const input = $("#api-key");
-  input.type = input.type === "password" ? "text" : "password";
+  if (input.type === "text") { input.type = "password"; return; }
+  // Nothing typed yet: pull the saved key so it can actually be read/copied.
+  if (!input.value) {
+    const resp = await fetch("/api/config/api-key");
+    if (resp.ok) input.value = (await resp.json()).api_key || "";
+  }
+  input.type = "text";
 });
 $("#key-regen").addEventListener("click", async () => {
   const resp = await fetch("/api/config/regenerate-key", { method: "POST" });
@@ -863,7 +871,7 @@ $("#key-regen").addEventListener("click", async () => {
   const input = $("#api-key");
   input.type = "text";
   input.value = data.api_key;
-  $("#auth-state").textContent = "New key generated — copy it now, then it will be hidden. Click Save if not already saved.";
+  $("#auth-state").textContent = "New key generated and saved. Copy it and update any clients using the old key.";
 });
 $("#key-copy").addEventListener("click", async () => {
   const input = $("#api-key");

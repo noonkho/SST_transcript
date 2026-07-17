@@ -313,6 +313,26 @@ submission with a live progress bar:
 uv run python client_example.py meeting.m4a
 ```
 
+### `GET /health` — readiness probe
+
+Lightweight liveness/readiness check for orchestrators and clients that verify the
+backend at startup. **No auth** (works even with login enabled), no inference, no
+disk access — it reads in-memory state only and answers in ~2 ms.
+
+```bash
+curl -s http://localhost:8756/health
+```
+
+| Server state | HTTP | Body |
+|---|---|---|
+| Both models loaded | 200 | `{"status":"ready","version":"0.1.0","models_loaded":["openai/whisper-large-v3","pyannote/speaker-diarization-community-1"]}` |
+| STT up, diarizer not loaded | 200 | adds `"warnings":[{"code":"model_not_loaded","model":"pyannote/speaker-diarization-community-1"}]` — transcription still works, so this is **not** a failure |
+| STT not loaded (starting, downloading, or failed) | 503 | `{"status":"degraded","version":"0.1.0","error":"Required model openai/whisper-large-v3 not loaded or accessible"}` |
+
+`ready` means the configured STT model is resident and transcription can serve.
+Use it as a Kubernetes liveness/readiness probe, or poll it after boot — a cold
+start returns 503 until the model finishes loading.
+
 ### `GET /v1/models` — discovery & validation
 
 Lists every model the server can serve *right now* (curated + any added from
@@ -394,6 +414,7 @@ The web UI's own `/api/*` endpoints are unchanged — they keep FastAPI's
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /health` | Readiness probe — 200 `ready` / 503 `degraded`. No auth |
 | `GET /v1/models` | List servable models + capabilities (OpenAI-style) |
 | `POST /api/transcribe` | Async job submission (returns a job id immediately) |
 | `GET /api/jobs/{id}` | Job status, progress, ETA, and result |
