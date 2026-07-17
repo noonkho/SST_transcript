@@ -293,6 +293,64 @@ def health():
 
 # ------------------------------------------------------- OpenAI-compatible
 
+def _verbose_json(result: dict) -> dict:
+    """OpenAI verbose_json view of a finished result."""
+    return {
+        "task": "transcribe",
+        "language": result.get("language", ""),
+        "duration": result.get("duration", 0),
+        "text": result.get("text", ""),
+        "segments": [{"id": i, **seg} for i, seg in enumerate(result.get("segments", []))],
+        "speakers": result.get("speakers"),
+        "model": result.get("model"),
+        "diarization_model": result.get("diarization_model"),
+        "warnings": result.get("warnings", []),
+    }
+
+
+def _ndjson_progress(job, response_format: str):
+    """Newline-delimited progress events, then one final event carrying the
+    transcript — so a long job reports progress on the same request."""
+    def line(obj: dict) -> str:
+        return json.dumps(obj, ensure_ascii=False) + "\n"
+
+    yield line({"event": "accepted", "job_id": job.id})
+    last_done = 0    # no chunk_complete until a chunk actually finishes
+    last_total = 0
+    while job.status in ("queued", "running"):
+        if job.chunks_total != last_total and job.chunks_total:
+            last_total = job.chunks_total
+            yield line({"event": "chunks_planned", "chunks_total": job.chunks_total,
+                        "duration_seconds": round(job.audio_duration, 2)})
+        if job.chunks_done != last_done:
+            last_done = job.chunks_done
+            yield line({"event": "chunk_complete", "chunk_index": max(0, last_done - 1),
+                        "chunks_complete": last_done, "chunks_total": job.chunks_total,
+                        "percent": round(job.progress * 100)})
+        else:
+            yield line({"event": "progress", "stage": job.stage,
+                        "percent": round(job.progress * 100),
+                        "eta_seconds": job.eta_seconds})
+        time.sleep(1.0)
+
+    if job.status == "error":
+        yield line({"event": "error", "job_id": job.id, "message": job.error})
+        return
+    if job.status == "cancelled":
+        yield line({"event": "cancelled", "job_id": job.id})
+        return
+    result = dict(job.result or {})
+    result.setdefault("warnings", [])
+    body = _verbose_json(result) if response_format == "verbose_json" else result
+    yield line({
+        "event": "complete",
+        "job_id": job.id,
+        "total_text_length": len(result.get("text", "")),
+        "duration_seconds": result.get("duration", 0),
+        "response": body,
+    })
+
+
 def _require_known_model(model: str) -> None:
     """Reject a model id the server can't serve. Empty = use the configured default."""
     if not model:
@@ -312,6 +370,7 @@ def openai_transcriptions(
     diarize: bool = Form(True),
     num_speakers: int | None = Form(None),
     diarization_model: str = Form(""),
+    stream_progress: bool = False,   # query param: ?stream_progress=true -> NDJSON
 ):
     """OpenAI-compatible transcription. Blocks until the result is ready.
 
@@ -327,6 +386,9 @@ def openai_transcriptions(
         )
     _require_known_model(model)
     _require_known_model(diarization_model)
+    if stream_progress and response_format not in ("json", "verbose_json"):
+        raise OpenAIError(400, "stream_progress requires response_format json or verbose_json",
+                          "invalid_response_format")
     job = _submit(file, {
         "model": model or None,
         "language": language or None,
@@ -334,6 +396,10 @@ def openai_transcriptions(
         "num_speakers": num_speakers,
         "diarization_model": diarization_model or None,
     })
+    if stream_progress:
+        return StreamingResponse(_ndjson_progress(job, response_format),
+                                 media_type="application/x-ndjson",
+                                 headers={"X-Job-ID": job.id})
     while job.status in ("queued", "running"):
         time.sleep(0.3)
     if job.status == "error":
@@ -346,21 +412,28 @@ def openai_transcriptions(
     # read it unconditionally. `speakers` is null when no diarization ran.
     result.setdefault("warnings", [])
     if response_format == "verbose_json":
-        result = {
-            "task": "transcribe",
-            "language": result.get("language", ""),
-            "duration": result.get("duration", 0),
-            "text": result.get("text", ""),
-            "segments": [
-                {"id": i, **seg} for i, seg in enumerate(result.get("segments", []))
-            ],
-            "speakers": result.get("speakers"),
-            "model": result.get("model"),
-            "diarization_model": result.get("diarization_model"),
-            "warnings": result.get("warnings", []),
-        }
+        result = _verbose_json(result)
     formatter, content_type = FORMATTERS[response_format]
-    return Response(content=formatter(result), media_type=content_type)
+    return Response(content=formatter(result), media_type=content_type,
+                    headers={"X-Job-ID": job.id})
+
+
+@app.get("/v1/audio/transcriptions/{job_id}/progress")
+def openai_progress(job_id: str):
+    """Poll a job's progress. Job ids come from the X-Job-ID response header,
+    the NDJSON stream, or POST /api/transcribe."""
+    job = jobs.get(job_id)
+    if not job:
+        raise OpenAIError(404, f"Job not found: {job_id}", "not_found")
+    return {
+        "status": {"queued": "queued", "running": "processing", "done": "complete",
+                   "error": "error", "cancelled": "cancelled"}.get(job.status, job.status),
+        "chunks_complete": job.chunks_done,
+        "chunks_total": job.chunks_total,
+        "percent": round(job.progress * 100),
+        "stage": job.stage,
+        "eta_seconds": job.eta_seconds,
+    }
 
 
 @app.get("/v1/models")

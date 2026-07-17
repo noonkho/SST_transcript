@@ -290,6 +290,48 @@ Response (`verbose_json`):
 }
 ```
 
+### Word-level timestamps & stable speaker labels
+
+`verbose_json` segments carry a `words` array:
+
+```json
+{"id": 0, "start": 0.0, "end": 2.5, "speaker": "SPEAKER_00", "text": "Good morning everyone.",
+ "words": [{"word": "Good", "start": 0.0, "end": 0.3}, {"word": "morning", "start": 0.3, "end": 0.8}]}
+```
+
+- Whisper produces real word timings (they already drive speaker splitting).
+- Engines without word timestamps (SenseVoice) degrade to **one entry spanning the
+  segment** — the array is never missing.
+- **Speaker labels are deterministic**: `SPEAKER_00` is always the first speaker
+  heard, so re-running the same file yields identical labels. Labels are *per file* —
+  `SPEAKER_00` in file A and file B are not guaranteed to be the same person.
+
+### Progress for long files
+
+Audio is always split on silence into ≤28 s chunks (Whisper's window), so multi-hour
+files stream through without timing out — no size threshold to configure.
+
+**Poll:** every response carries an `X-Job-ID` header.
+
+```bash
+curl -s http://localhost:8756/v1/audio/transcriptions/<job-id>/progress
+# {"status":"processing","chunks_complete":2,"chunks_total":4,"percent":50,"stage":"transcribing","eta_seconds":31.2}
+```
+
+**Stream (NDJSON):** add `?stream_progress=true` to get progress on the same request;
+the last line carries the finished transcript, identical to the non-streaming response.
+
+```bash
+curl -N -s "http://localhost:8756/v1/audio/transcriptions?stream_progress=true" \
+  -F file=@meeting.m4a -F response_format=verbose_json
+```
+```
+{"event":"accepted","job_id":"a1b2c3"}
+{"event":"chunks_planned","chunks_total":4,"duration_seconds":7200}
+{"event":"chunk_complete","chunk_index":0,"chunks_complete":1,"chunks_total":4,"percent":30}
+{"event":"complete","job_id":"a1b2c3","total_text_length":10840,"duration_seconds":7200,"response":{…}}
+```
+
 ### Graceful degradation when diarization is unavailable
 
 `diarize` defaults to `true`, but a missing or unloadable diarization model never

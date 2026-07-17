@@ -104,6 +104,8 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     chunk_times: list[float] = []
     processed_audio = 0.0
     total_chunk_audio = sum(c.end - c.start for c in chunks) or 1.0
+    job.chunks_total = len(chunks)
+    job.chunks_done = 0
 
     for i, chunk in enumerate(chunks):
         job.check_cancelled()
@@ -118,6 +120,7 @@ def _run_locked(job: Job, audio_path: str) -> dict:
             detected_language = detected_language or seg.language
         chunk_times.append(time.time() - t0)
         processed_audio += chunk.end - chunk.start
+        job.chunks_done = i + 1
 
         frac = processed_audio / total_chunk_audio
         job.progress = W_LOAD + W_DECODE + W_DIAR + W_STT * frac
@@ -132,7 +135,9 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     # No turns (diarization off, unavailable, or it found nothing) => speaker is
     # genuinely unknown. Say so with null rather than inventing "SPEAKER_00".
     out_segments = _merge_speakers(segments, turns) if turns else [
-        {"start": round(s.start, 3), "end": round(s.end, 3), "speaker": None, "text": s.text.strip()}
+        {"start": round(s.start, 3), "end": round(s.end, 3), "speaker": None,
+         "text": s.text.strip(),
+         "words": _word_list(s.words, s.start, s.end, s.text)}
         for s in segments if s.text.strip()
     ]
     speakers = sorted({s["speaker"] for s in out_segments if s["speaker"]}) or None
@@ -188,6 +193,7 @@ def _merge_speakers(segments: list[SttSegment], turns: list[SpeakerTurn]) -> lis
             out.append({
                 "start": round(seg.start, 3), "end": round(seg.end, 3),
                 "speaker": spk, "text": seg.text.strip(),
+                "words": _word_list(seg.words, seg.start, seg.end, seg.text),
             })
 
     # Merge consecutive same-speaker fragments separated by < 1 s.
@@ -202,12 +208,24 @@ def _merge_speakers(segments: list[SttSegment], turns: list[SpeakerTurn]) -> lis
     return merged
 
 
+def _word_list(words: list, start: float, end: float, text: str) -> list[dict]:
+    """Word timings for the API. Engines without word timestamps (SenseVoice)
+    degrade to a single entry spanning the segment."""
+    if not words:
+        return [{"word": text.strip(), "start": round(start, 3), "end": round(end, 3)}]
+    return [{"word": w.text.strip(), "start": round(w.start, 3), "end": round(w.end, 3)}
+            for w in words if w.text.strip()]
+
+
 def _words_to_segment(words: list, speaker: str) -> dict:
+    text = "".join(w.text for w in words).strip()
+    start, end = words[0].start, words[-1].end
     return {
-        "start": round(words[0].start, 3),
-        "end": round(words[-1].end, 3),
+        "start": round(start, 3),
+        "end": round(end, 3),
         "speaker": speaker,
-        "text": "".join(w.text for w in words).strip(),
+        "text": text,
+        "words": _word_list(words, start, end, text),
     }
 
 

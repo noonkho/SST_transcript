@@ -41,6 +41,8 @@ class Job:
     eta_seconds: float | None = None
     elapsed_seconds: float = 0.0
     audio_duration: float = 0.0
+    chunks_total: int = 0      # silence-aligned chunks the audio was split into
+    chunks_done: int = 0
     error: str = ""
     result: dict | None = None
     params: dict = field(default_factory=dict)
@@ -69,6 +71,8 @@ class Job:
             "eta_seconds": round(self.eta_seconds, 1) if self.eta_seconds is not None else None,
             "elapsed_seconds": round(self.elapsed_seconds, 1),
             "audio_duration": round(self.audio_duration, 1),
+            "chunks_total": self.chunks_total,
+            "chunks_done": self.chunks_done,
             "error": self.error,
             "params": self.params,
             "has_audio": bool(self.audio_path and Path(self.audio_path).exists()),
