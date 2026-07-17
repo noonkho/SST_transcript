@@ -30,6 +30,41 @@ BASE_URL = "http://localhost:8756"
 
 
 # ------------------------------------------------------------------
+# 0. Discover models and validate one before transcribing
+# ------------------------------------------------------------------
+def list_models(headers: dict | None = None) -> list[dict]:
+    """GET /v1/models — every model the server can serve, with capabilities."""
+    resp = requests.get(f"{BASE_URL}/v1/models", headers=headers or {}, timeout=30)
+    resp.raise_for_status()
+    return resp.json()["data"]
+
+
+def validate_model(model_id: str, need: str = "transcription") -> dict:
+    """Check a configured model id against the server before sending audio.
+
+    Raises ValueError with the available ids if it can't be served — cheaper
+    than discovering it after uploading a long recording.
+    """
+    models = list_models()
+    match = next((m for m in models if m["id"] == model_id), None)
+    if match is None:
+        usable = [m["id"] for m in models if need in m["capabilities"]]
+        raise ValueError(f"Model {model_id!r} not available. Server offers: {usable}")
+    if need not in match["capabilities"]:
+        raise ValueError(f"Model {model_id!r} cannot do {need}; it does {match['capabilities']}")
+    return match
+
+
+def explain_error(resp: requests.Response) -> str:
+    """/v1 errors are OpenAI-shaped: {"error": {message, type, code}}."""
+    try:
+        err = resp.json()["error"]
+        return f"[{resp.status_code} {err['code']}] {err['message']}"
+    except Exception:
+        return f"[{resp.status_code}] {resp.text[:200]}"
+
+
+# ------------------------------------------------------------------
 # 1. Simple blocking call (OpenAI-compatible endpoint)
 # ------------------------------------------------------------------
 def transcribe_simple(audio_path: str) -> dict:
@@ -45,7 +80,8 @@ def transcribe_simple(audio_path: str) -> dict:
             },
             timeout=3600,
         )
-    resp.raise_for_status()
+    if not resp.ok:
+        raise RuntimeError(explain_error(resp))
     return resp.json()
 
 
@@ -95,7 +131,12 @@ if __name__ == "__main__":
         sys.exit(1)
     path = sys.argv[1]
 
-    print(f"Transcribing {path} …")
+    print("Models the server can serve:")
+    for m in list_models():
+        extra = f" · {len(m['languages'])} languages" if m.get("languages") else ""
+        print(f"  {m['id']}  ({', '.join(m['capabilities'])}{extra})")
+
+    print(f"\nTranscribing {path} …")
     result = transcribe_with_progress(path)
 
     print(f"\nLanguage: {result['language']}   Duration: {result['duration']}s   "

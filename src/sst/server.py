@@ -20,6 +20,12 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -45,6 +51,14 @@ from .auth import (
 )
 from .config import AppConfig, config
 from .formats import FORMATTERS
+from .openai_compat import (
+    OPENAI_FORMATS,
+    OpenAIError,
+    code_for_status,
+    error_body,
+    model_entry,
+    type_for_status,
+)
 from .jobs import jobs
 from .manager import manager
 from .pipeline import run_transcription
@@ -87,6 +101,59 @@ app = FastAPI(
 )
 
 
+# --------------------------------------------------- OpenAI error envelope
+# Scoped to /v1: those clients (OpenAI SDKs, Feenote) expect
+# {"error": {message, type, code}}. Everything else — including the web UI's
+# /api endpoints, which app.js reads as {"detail": ...} — keeps FastAPI's
+# default shape.
+
+def _is_v1(request: Request) -> bool:
+    return request.url.path.startswith("/v1")
+
+
+@app.exception_handler(OpenAIError)
+async def _openai_error_handler(request: Request, exc: OpenAIError):
+    return JSONResponse(
+        status_code=exc.status,
+        content=error_body(exc.message, exc.type, exc.code),
+    )
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if _is_v1(request):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_body(str(exc.detail), type_for_status(exc.status_code),
+                               code_for_status(exc.status_code)),
+            headers=getattr(exc, "headers", None),
+        )
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    if _is_v1(request):
+        for err in exc.errors():
+            if err.get("type") == "missing":
+                field = err["loc"][-1]
+                return JSONResponse(
+                    status_code=400,
+                    content=error_body(
+                        f"Request body missing required field: {field}",
+                        "invalid_request_error", "missing_required_field"),
+                )
+        # Present but unusable (wrong type, out of range) -> unprocessable.
+        first = exc.errors()[0] if exc.errors() else {}
+        where = ".".join(str(p) for p in first.get("loc", [])[1:]) or "request"
+        return JSONResponse(
+            status_code=422,
+            content=error_body(f"Invalid value for {where}: {first.get('msg', 'validation failed')}",
+                               "invalid_request_error", "invalid_value"),
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
 # ------------------------------------------------------------------- auth
 # Allow-list of paths that never require auth, even when config.auth_enabled.
 PUBLIC_PREFIXES = ("/static/",)
@@ -113,6 +180,12 @@ async def auth_gate(request: Request, call_next):
     accepts_html = "text/html" in request.headers.get("accept", "")
     if accepts_html and request.method == "GET":
         return RedirectResponse(f"/login?next={path}", status_code=303)
+    if _is_v1(request):
+        return JSONResponse(
+            error_body("Incorrect or missing API key. Pass it as "
+                       "'Authorization: Bearer <key>'.",
+                       "invalid_api_key", "invalid_api_key"),
+            status_code=401, headers={"WWW-Authenticate": "Bearer"})
     return JSONResponse({"detail": "authentication required"}, status_code=401,
                         headers={"WWW-Authenticate": "Bearer"})
 
@@ -186,6 +259,14 @@ def _attachment_headers(filename: str) -> dict:
 
 # ------------------------------------------------------- OpenAI-compatible
 
+def _require_known_model(model: str) -> None:
+    """Reject a model id the server can't serve. Empty = use the configured default."""
+    if not model:
+        return
+    if model not in manager.downloaded_repos():
+        raise OpenAIError(400, f"Model not found: {model}", "model_not_found")
+
+
 @app.post("/v1/audio/transcriptions")
 def openai_transcriptions(
     file: UploadFile = File(...),
@@ -203,8 +284,15 @@ def openai_transcriptions(
     Extensions beyond OpenAI: `diarize`, `num_speakers`, `diarization_model`;
     every JSON response includes diarized `segments`.
     """
-    if response_format not in FORMATTERS:
-        raise HTTPException(400, f"response_format must be one of {list(FORMATTERS)}")
+    if response_format not in OPENAI_FORMATS:
+        raise OpenAIError(
+            400,
+            f"Unsupported response_format: {response_format}. "
+            f"Supported: {', '.join(OPENAI_FORMATS)}",
+            "invalid_response_format",
+        )
+    _require_known_model(model)
+    _require_known_model(diarization_model)
     job = _submit(file, {
         "model": model or None,
         "language": language or None,
@@ -238,19 +326,25 @@ def openai_transcriptions(
 
 @app.get("/v1/models")
 def openai_models():
+    """Every model this server can serve right now, with its capabilities.
+
+    Clients validate a configured model id against this before transcribing.
+    """
     downloaded = manager.downloaded_repos()
-    data = []
-    for entry in CATALOG:
-        if entry.repo_id in downloaded:
-            data.append({
-                "id": entry.repo_id,
-                "object": "model",
-                "created": 0,
-                "owned_by": entry.repo_id.split("/")[0],
-                "kind": entry.kind,
-                "languages": entry.languages,
-                "loaded": entry.repo_id in (manager.stt_repo, manager.diar_repo),
-            })
+    loaded = (manager.stt_repo, manager.diar_repo)
+    data = [
+        model_entry(e.repo_id, e.kind, e.engine, loaded=e.repo_id in loaded)
+        for e in CATALOG if e.repo_id in downloaded
+    ]
+    # Models added from Hugging Face search are usable as `model=` too, so a
+    # client validating against this list must see them.
+    known = {e.repo_id for e in CATALOG}
+    for custom in manager.custom_downloaded():
+        if custom["repo_id"] in known or not custom["supported"]:
+            continue
+        data.append(model_entry(custom["repo_id"], "stt", custom["engine"] or "",
+                                loaded=custom["repo_id"] in loaded))
+    data.sort(key=lambda m: m["id"])
     return {"object": "list", "data": data}
 
 

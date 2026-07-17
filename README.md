@@ -258,9 +258,9 @@ Multipart form fields:
 | Field | Default | Description |
 |---|---|---|
 | `file` | *required* | The audio file |
-| `model` | server default | Any downloaded STT model id |
+| `model` | server default | Any id from [`GET /v1/models`](#get-v1models--discovery--validation); unknown ids → 400 `model_not_found` |
 | `language` | auto | `yue` (Cantonese), `zh` (Mandarin), `en` (English), … |
-| `response_format` | `json` | `json`, `verbose_json`, `text`, `srt`, `vtt` |
+| `response_format` | `json` | `json`, `verbose_json`, `text`, `srt`, `vtt` (DOCX is UI-only, via `/api/jobs/{id}/download`) |
 | `diarize` | `true` | *(SST extension)* speaker diarization on/off |
 | `num_speakers` | auto | *(SST extension)* number of speakers, if known |
 | `diarization_model` | server default | *(SST extension)* diarization model id |
@@ -313,11 +313,88 @@ submission with a live progress bar:
 uv run python client_example.py meeting.m4a
 ```
 
+### `GET /v1/models` — discovery & validation
+
+Lists every model the server can serve *right now* (curated + any added from
+Hugging Face search), with what each can do. Validate a configured model id
+against this before uploading audio.
+
+```bash
+curl -s http://localhost:8756/v1/models
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "openai/whisper-large-v3",
+      "object": "model",
+      "owned_by": "openai",
+      "kind": "stt",
+      "capabilities": ["transcription", "diarization"],
+      "languages": ["af", "am", "…", "yue", "zh"],
+      "input_modality": "audio",
+      "max_audio_length_seconds": 3600,
+      "loaded": true
+    },
+    {
+      "id": "pyannote/speaker-diarization-community-1",
+      "object": "model",
+      "owned_by": "pyannote",
+      "kind": "diarization",
+      "capabilities": ["diarization"],
+      "input_modality": "audio",
+      "loaded": true
+    }
+  ]
+}
+```
+
+- `capabilities` — STT models report `transcription` **and** `diarization`, because
+  the service pairs any STT model with a diarizer on the same request.
+- `languages` — read live from the model's own tokenizer (Whisper reports all 99
+  codes including `yue`); omitted for diarization models, which are language-independent.
+- `max_audio_length_seconds` — **advisory guidance for clients, not enforced.** The
+  pipeline chunks on silence and handles multi-hour files; this is what a comfortable
+  single request looks like.
+
+```python
+# validate before sending audio (see client_example.py)
+models = requests.get("http://localhost:8756/v1/models").json()["data"]
+ids = [m["id"] for m in models if "transcription" in m["capabilities"]]
+assert MY_MODEL in ids, f"{MY_MODEL} unavailable; server offers {ids}"
+```
+
+### `/v1` error format
+
+Every `/v1` error returns the OpenAI envelope, so OpenAI SDKs and other clients can
+parse failures uniformly:
+
+```json
+{"error": {"message": "Model not found: nonexistent-whisper",
+           "type": "invalid_request_error",
+           "code": "model_not_found"}}
+```
+
+| Status | `type` | Example `code` | When |
+|---|---|---|---|
+| 400 | `invalid_request_error` | `model_not_found` | `model`/`diarization_model` isn't downloaded |
+| 400 | `invalid_request_error` | `missing_required_field` | no `file` in the request |
+| 400 | `invalid_request_error` | `invalid_response_format` | `response_format` not one of `json, verbose_json, text, srt, vtt` |
+| 401 | `invalid_api_key` | `invalid_api_key` | login enabled and the Bearer key is wrong/missing |
+| 422 | `invalid_request_error` | `invalid_value` | a field is present but unusable |
+| 429 | `rate_limit_error` | `rate_limit_exceeded` | too many failed logins |
+| 500 | `server_error` | `internal_error` | transcription failed |
+
+The web UI's own `/api/*` endpoints are unchanged — they keep FastAPI's
+`{"detail": "..."}` shape. Only `/v1` speaks the OpenAI dialect.
+
 ### Other endpoints
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/models` | List downloaded models (OpenAI-style) |
+| `GET /v1/models` | List servable models + capabilities (OpenAI-style) |
 | `POST /api/transcribe` | Async job submission (returns a job id immediately) |
 | `GET /api/jobs/{id}` | Job status, progress, ETA, and result |
 | `GET /api/jobs/{id}/events` | Server-sent events stream of progress |
