@@ -284,9 +284,46 @@ Response (`verbose_json`):
     {"id": 1, "start": 6.6, "end": 13.2, "speaker": "SPEAKER_01", "text": "Thank you, 我哋開始啦"}
   ],
   "speakers": ["SPEAKER_00", "SPEAKER_01"],
-  "model": "openai/whisper-large-v3"
+  "model": "openai/whisper-large-v3",
+  "diarization_model": "pyannote/speaker-diarization-community-1",
+  "warnings": []
 }
 ```
+
+### Graceful degradation when diarization is unavailable
+
+`diarize` defaults to `true`, but a missing or unloadable diarization model never
+fails the request — **transcription is not lost**. The server returns **200** with the
+transcript, `speakers: null`, every `segments[].speaker` set to `null` (the key is
+always present), and a `warnings` entry:
+
+```json
+{
+  "text": "Good morning everyone…",
+  "language": "en",
+  "duration": 42.5,
+  "segments": [{"id": 0, "start": 0.0, "end": 2.5, "text": "Good morning…", "speaker": null}],
+  "speakers": null,
+  "diarization_model": null,
+  "warnings": [
+    {
+      "code": "diarization_unavailable",
+      "message": "Diarization model pyannote/speaker-diarization-community-1 not loaded; segments processed without speaker labels. Segments[].speaker is null."
+    }
+  ]
+}
+```
+
+- `warnings` is present on **every** response — an empty array when nothing degraded.
+- The same `diarization_unavailable` code covers both "the model wouldn't load" and
+  "the diarizer failed mid-run"; the message says which.
+- `speaker` is `null` whenever no diarization ran (including `diarize=false`) rather
+  than a fabricated `SPEAKER_00`. `speakers` is `null` too, and `diarization_model`
+  reports what actually ran.
+- Only the STT model failing to load is fatal (500) — without it there is no transcript.
+- An explicit `diarization_model=` that the server doesn't have is still a
+  **400 `model_not_found`**: you asked for something specific, so it's a client error
+  rather than a silent downgrade.
 
 ### From an LLM application (Python)
 
@@ -352,10 +389,10 @@ curl -s http://localhost:8756/v1/models
       "object": "model",
       "owned_by": "openai",
       "kind": "stt",
-      "capabilities": ["transcription", "diarization"],
+      "capabilities": ["transcription"],
       "languages": ["af", "am", "…", "yue", "zh"],
       "input_modality": "audio",
-      "max_audio_length_seconds": 3600,
+      "max_audio_length_seconds": 43200,
       "loaded": true
     },
     {
@@ -371,13 +408,16 @@ curl -s http://localhost:8756/v1/models
 }
 ```
 
-- `capabilities` — STT models report `transcription` **and** `diarization`, because
-  the service pairs any STT model with a diarizer on the same request.
+- `capabilities` — what the model itself does. STT models report only
+  `transcription`; **no STT model can identify speakers.** Diarization comes from a
+  separate model (the entries with the `diarization` capability), which the server
+  pairs with the STT model when a request asks for it. So `diarize=true` works as
+  long as *some* diarization model is available — check for one in this list.
 - `languages` — read live from the model's own tokenizer (Whisper reports all 99
   codes including `yue`); omitted for diarization models, which are language-independent.
-- `max_audio_length_seconds` — **advisory guidance for clients, not enforced.** The
-  pipeline chunks on silence and handles multi-hour files; this is what a comfortable
-  single request looks like.
+- `max_audio_length_seconds` — 43200 (12 h). **Advisory guidance for clients, not
+  enforced.** The pipeline chunks on silence and handles multi-hour files; this is
+  what a comfortable single request looks like.
 
 ```python
 # validate before sending audio (see client_example.py)

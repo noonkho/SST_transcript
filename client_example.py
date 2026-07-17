@@ -139,10 +139,17 @@ if __name__ == "__main__":
     print(f"\nTranscribing {path} …")
     result = transcribe_with_progress(path)
 
+    # Partial success: transcription can succeed while diarization degrades,
+    # so check warnings rather than assuming speaker labels exist.
+    for w in result.get("warnings") or []:
+        print(f"  ⚠️  [{w['code']}] {w['message']}")
+
+    speakers = result["speakers"] or []
     print(f"\nLanguage: {result['language']}   Duration: {result['duration']}s   "
-          f"Speakers: {', '.join(result['speakers'])}\n")
+          f"Speakers: {', '.join(speakers) if speakers else '— (no diarization)'}\n")
     for seg in result["segments"]:
-        print(f"[{seg['start']:7.2f} – {seg['end']:7.2f}] {seg['speaker']}: {seg['text']}")
+        who = seg["speaker"] or "—"
+        print(f"[{seg['start']:7.2f} – {seg['end']:7.2f}] {who}: {seg['text']}")
 
     out = "transcript.json"
     with open(out, "w", encoding="utf-8") as f:

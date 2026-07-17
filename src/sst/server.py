@@ -342,6 +342,9 @@ def openai_transcriptions(
         raise HTTPException(499, "transcription cancelled")
 
     result = dict(job.result or {})
+    # `warnings` is always present (empty when nothing degraded) so clients can
+    # read it unconditionally. `speakers` is null when no diarization ran.
+    result.setdefault("warnings", [])
     if response_format == "verbose_json":
         result = {
             "task": "transcribe",
@@ -351,8 +354,10 @@ def openai_transcriptions(
             "segments": [
                 {"id": i, **seg} for i, seg in enumerate(result.get("segments", []))
             ],
-            "speakers": result.get("speakers", []),
+            "speakers": result.get("speakers"),
             "model": result.get("model"),
+            "diarization_model": result.get("diarization_model"),
+            "warnings": result.get("warnings", []),
         }
     formatter, content_type = FORMATTERS[response_format]
     return Response(content=formatter(result), media_type=content_type)
@@ -730,10 +735,13 @@ def api_job_update_result(job_id: str, body: dict):
     cleaned = []
     for seg in segments:
         try:
+            # speaker may be null — no diarization ran, or the editor left the
+            # line unassigned. Keep it null rather than coercing to "None".
+            speaker = seg.get("speaker")
             cleaned.append({
                 "start": round(float(seg["start"]), 3),
                 "end": round(float(seg["end"]), 3),
-                "speaker": str(seg["speaker"])[:80] or "SPEAKER_00",
+                "speaker": str(speaker)[:80] if speaker else None,
                 "text": str(seg["text"]),
             })
         except (KeyError, TypeError, ValueError):
@@ -741,7 +749,7 @@ def api_job_update_result(job_id: str, body: dict):
     cleaned.sort(key=lambda s: s["start"])
     result = dict(job.result)
     result["segments"] = cleaned
-    result["speakers"] = sorted({s["speaker"] for s in cleaned})
+    result["speakers"] = sorted({s["speaker"] for s in cleaned if s["speaker"]}) or None
     result["text"] = " ".join(s["text"] for s in cleaned).strip()
     result["edited"] = True
     colors = body.get("speaker_colors")
@@ -749,7 +757,7 @@ def api_job_update_result(job_id: str, body: dict):
         result["speaker_colors"] = {
             str(name)[:80]: int(idx) % 10
             for name, idx in colors.items()
-            if isinstance(idx, (int, float)) and str(name) in result["speakers"]
+            if isinstance(idx, (int, float)) and str(name) in (result["speakers"] or [])
         }
     jobs.update_result(job, result)
     return {"ok": True, "result": result}

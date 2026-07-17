@@ -21,10 +21,13 @@ def to_json(result: dict) -> str:
 
 
 def to_vtt(result: dict) -> str:
+    # speaker is null when no diarization ran — emit a plain cue rather than
+    # labelling the line "None".
     lines = ["WEBVTT", ""]
     for seg in result["segments"]:
         lines.append(f"{_ts_vtt(seg['start'])} --> {_ts_vtt(seg['end'])}")
-        lines.append(f"<v {seg['speaker']}>{seg['text']}")
+        spk = seg.get("speaker")
+        lines.append(f"<v {spk}>{seg['text']}" if spk else seg["text"])
         lines.append("")
     return "\n".join(lines)
 
@@ -34,13 +37,17 @@ def to_srt(result: dict) -> str:
     for i, seg in enumerate(result["segments"], start=1):
         lines.append(str(i))
         lines.append(f"{_ts_srt(seg['start'])} --> {_ts_srt(seg['end'])}")
-        lines.append(f"[{seg['speaker']}] {seg['text']}")
+        spk = seg.get("speaker")
+        lines.append(f"[{spk}] {seg['text']}" if spk else seg["text"])
         lines.append("")
     return "\n".join(lines)
 
 
 def to_text(result: dict) -> str:
-    return "\n".join(f"[{seg['speaker']}] {seg['text']}" for seg in result["segments"])
+    return "\n".join(
+        f"[{seg['speaker']}] {seg['text']}" if seg.get("speaker") else seg["text"]
+        for seg in result["segments"]
+    )
 
 
 def to_docx(result: dict) -> bytes:
@@ -61,7 +68,7 @@ def to_docx(result: dict) -> bytes:
     meta.add_run(
         f"Duration: {_ts_vtt(result.get('duration', 0))}   ·   "
         f"Language: {result.get('language', 'auto')}   ·   "
-        f"Speakers: {', '.join(result.get('speakers', []))}"
+        f"Speakers: {', '.join(result.get('speakers') or ['—'])}"
     ).font.size = Pt(9)
 
     table = doc.add_table(rows=1, cols=6)
@@ -77,7 +84,7 @@ def to_docx(result: dict) -> bytes:
         row[0].text = str(i)
         row[1].text = _ts_vtt(seg["start"])
         row[2].text = _ts_vtt(seg["end"])
-        row[3].text = seg["speaker"]
+        row[3].text = seg.get("speaker") or ""
         row[4].text = ":"
         row[5].text = seg["text"]
 

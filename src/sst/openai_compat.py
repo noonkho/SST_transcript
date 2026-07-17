@@ -91,9 +91,11 @@ def model_entry(repo_id: str, kind: str, engine: str, *, loaded: bool) -> dict:
         "loaded": loaded,
     }
     if kind == "stt":
-        # The service pairs any STT model with a diarizer, so transcription
-        # requests against it can return speaker labels.
-        entry["capabilities"] = ["transcription", "diarization"]
+        # Transcription only: an STT model cannot identify speakers. Diarization
+        # is supplied by a separate diarization model (see the entries with the
+        # "diarization" capability), which the server pairs with this one when a
+        # request asks for it.
+        entry["capabilities"] = ["transcription"]
         entry["languages"] = languages_for(engine)
         entry["max_audio_length_seconds"] = MAX_AUDIO_SECONDS
     else:

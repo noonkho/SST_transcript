@@ -183,6 +183,11 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
 .speaker-bar input {
   min-width: 120px; width: 140px; padding: 3px 8px; font-size: 12px; border-radius: 20px;
 }
+.result-warnings {
+  font-size: 12.5px; line-height: 1.5; color: #d97b00;
+  background: rgba(255,149,0,0.12); border: 1px solid rgba(255,149,0,0.3);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 12px;
+}
 .edit-hint { font-size: 11.5px; color: var(--text-2); margin-bottom: 10px; line-height: 1.6; }
 kbd {
   font-family: "SF Mono", ui-monospace, monospace; font-size: 10.5px;

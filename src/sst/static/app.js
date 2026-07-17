@@ -171,8 +171,13 @@ function colorIdx(speaker) {
 }
 
 function speakerClass(speaker) {
+  if (!speaker) return "spk-9";  // unknown speaker (no diarization) — neutral grey
   return "spk-" + colorIdx(speaker);
 }
+
+/* speaker is null when no diarization ran; show a placeholder, not "null" */
+const UNKNOWN_SPEAKER = "—";
+function speakerLabel(speaker) { return speaker || UNKNOWN_SPEAKER; }
 
 function isCJK(ch) {
   if (!ch) return false;
@@ -203,6 +208,12 @@ function showResult(job) {
   $("#result-meta").textContent =
     `${fmtDur(r.duration)} · ${(r.speakers || []).length} speaker(s) · language: ${r.language || "auto"} · ` +
     `model: ${r.model}` + (r.edited ? " · edited" : "");
+  // e.g. diarization was requested but the diarizer couldn't load — the
+  // transcript is still here, just without speaker labels.
+  const warn = $("#result-warnings");
+  const msgs = (r.warnings || []).map((w) => w.message);
+  warn.textContent = msgs.length ? "⚠️ " + msgs.join(" ") : "";
+  warn.style.display = msgs.length ? "" : "none";
   const src = `/api/jobs/${job.id}/audio`;
   if (job.has_audio === false) { player.style.display = "none"; }
   else { player.style.display = ""; if (!player.src.endsWith(src)) { player.src = src; } }
@@ -215,7 +226,8 @@ function showResult(job) {
 
 /* ---------- speaker bar (rename speakers) ---------- */
 function allSpeakers() {
-  return [...new Set(current.result.segments.map((s) => s.speaker))];
+  // nulls (undiarized lines) aren't renameable speakers — skip them
+  return [...new Set(current.result.segments.map((s) => s.speaker).filter(Boolean))];
 }
 
 function renderSpeakerBar() {
@@ -303,7 +315,7 @@ function buildRow(seg, idx) {
   div.dataset.idx = idx;
   div.innerHTML = `
     <span class="seg-time">${ts(seg.start)} – ${ts(seg.end)}</span>
-    <span class="speaker-chip ${speakerClass(seg.speaker)}">${escapeHtml(seg.speaker)}</span>
+    <span class="speaker-chip ${speakerClass(seg.speaker)}">${escapeHtml(speakerLabel(seg.speaker))}</span>
     <span class="seg-text"></span>
     <button class="seg-insert" title="Insert a new line below">＋</button>`;
   div.querySelector(".seg-text").textContent = seg.text;
@@ -373,7 +385,7 @@ function commitEdit(rerender = true) {
   const idx = current.editingIdx;
   const seg = current.result.segments[idx];
   if (ta) seg.text = ta.value.trim();
-  if (sel && sel.value !== "__new__") seg.speaker = sel.value;
+  if (sel && sel.value !== "__new__") seg.speaker = sel.value || null;  // "" = unassigned
   if (!seg.text) current.result.segments.splice(idx, 1);  // saving an empty line deletes it
   current.editingIdx = null;
   current.loop = null;
@@ -402,6 +414,12 @@ function buildEditorRow(seg, idx) {
     <button class="icon-btn" data-act="cancel" title="Discard changes (Esc)">Cancel</button>`;
 
   const select = toolbar.querySelector("select");
+  // Lines with no speaker (diarization off/unavailable) start unassigned and
+  // can be given one here.
+  const noneOpt = document.createElement("option");
+  noneOpt.value = ""; noneOpt.textContent = UNKNOWN_SPEAKER + " (no speaker)";
+  if (!seg.speaker) noneOpt.selected = true;
+  select.appendChild(noneOpt);
   for (const spk of allSpeakers()) {
     const opt = document.createElement("option");
     opt.value = spk; opt.textContent = spk;

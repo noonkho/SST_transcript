@@ -8,6 +8,7 @@ import time
 import numpy as np
 
 from .audio import decode_audio, duration_seconds
+from .config import config
 from .diarize.base import SpeakerTurn
 from .jobs import Job
 from .manager import manager
@@ -36,15 +37,34 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     stt_model = params.get("model") or None
     diar_model = params.get("diarization_model") or None
 
+    warnings: list[dict] = []
+
     job.stage = "loading models"
     job.progress = 0.0
-    manager.ensure_loaded(stt_repo=stt_model, diar_repo=diar_model, load_diar=diarize)
+    # STT first and on its own: without it there is no transcript to return, so
+    # a failure here is fatal. The diarizer is loaded separately below so that
+    # its absence degrades the request instead of killing it.
+    manager.ensure_loaded(stt_repo=stt_model, load_diar=False)
     # Capture engines and repo names now — manager state can't change while we
     # hold the engines lock, but the result must reflect what actually ran.
     stt = manager.stt_engine
-    diar_engine = manager.diar_engine if diarize else None
     stt_repo_used = manager.stt_repo
-    diar_repo_used = manager.diar_repo if diarize else None
+
+    diar_engine = None
+    diar_repo_used = None
+    if diarize:
+        wanted = diar_model or config.diarization_model
+        try:
+            manager.ensure_loaded(stt_repo=stt_model, diar_repo=diar_model, load_diar=True)
+            diar_engine = manager.diar_engine
+            diar_repo_used = manager.diar_repo
+        except Exception as exc:  # noqa: BLE001
+            log.warning("diarization unavailable (%s) — transcribing without speaker labels", exc)
+            warnings.append({
+                "code": "diarization_unavailable",
+                "message": f"Diarization model {wanted} not loaded; segments processed "
+                           "without speaker labels. Segments[].speaker is null.",
+            })
     job.progress = W_LOAD
     job.check_cancelled()
 
@@ -61,9 +81,20 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     job.check_cancelled()
 
     turns: list[SpeakerTurn] = []
-    if diarize and chunks:
+    if diar_engine and chunks:
         job.stage = "diarizing"
-        turns = diar_engine.diarize(audio, num_speakers=num_speakers, speech=speech)
+        try:
+            turns = diar_engine.diarize(audio, num_speakers=num_speakers, speech=speech)
+        except Exception as exc:  # noqa: BLE001
+            # Loaded but blew up mid-inference — still return the transcript.
+            log.warning("diarization failed (%s) — returning transcript without labels", exc)
+            warnings.append({
+                "code": "diarization_unavailable",
+                "message": f"Diarization model {diar_repo_used} failed: {exc}. Segments "
+                           "processed without speaker labels. Segments[].speaker is null.",
+            })
+            turns = []
+            diar_repo_used = None
     job.progress = W_LOAD + W_DECODE + W_DIAR
     job.check_cancelled()
 
@@ -98,19 +129,23 @@ def _run_locked(job: Job, audio_path: str) -> dict:
         detected_language = stt.detect_language(chunks[0].audio)
 
     job.stage = "finalizing"
+    # No turns (diarization off, unavailable, or it found nothing) => speaker is
+    # genuinely unknown. Say so with null rather than inventing "SPEAKER_00".
     out_segments = _merge_speakers(segments, turns) if turns else [
-        {"start": round(s.start, 3), "end": round(s.end, 3), "speaker": "SPEAKER_00", "text": s.text.strip()}
+        {"start": round(s.start, 3), "end": round(s.end, 3), "speaker": None, "text": s.text.strip()}
         for s in segments if s.text.strip()
     ]
+    speakers = sorted({s["speaker"] for s in out_segments if s["speaker"]}) or None
 
     return {
         "language": detected_language or (language or ""),
         "duration": round(total, 3),
         "text": " ".join(s["text"] for s in out_segments).strip(),
         "segments": out_segments,
-        "speakers": sorted({s["speaker"] for s in out_segments}),
+        "speakers": speakers,
         "model": stt_repo_used,
         "diarization_model": diar_repo_used if turns else None,
+        "warnings": warnings,
     }
 
 

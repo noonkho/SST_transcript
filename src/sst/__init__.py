@@ -7,4 +7,4 @@ import os
 # resumable downloads. Must be set before huggingface_hub is imported.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"

@@ -1,6 +1,6 @@
 [project]
 name = "sst-service"
-version = "0.1.0"
+version = "1.0.0"
 description = "Local offline speech-to-text with speaker diarization (Cantonese/English/Mandarin/code-switching)"
 requires-python = ">=3.10,<3.13"
 dependencies = [
