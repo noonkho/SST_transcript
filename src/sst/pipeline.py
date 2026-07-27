@@ -33,6 +33,8 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     params = job.params
     language = params.get("language") or None
     num_speakers = params.get("num_speakers") or None
+    min_speakers = params.get("min_speakers") or None
+    max_speakers = params.get("max_speakers") or None
     diarize = params.get("diarize", True)
     stt_model = params.get("model") or None
     diar_model = params.get("diarization_model") or None
@@ -84,7 +86,10 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     if diar_engine and chunks:
         job.stage = "diarizing"
         try:
-            turns = diar_engine.diarize(audio, num_speakers=num_speakers, speech=speech)
+            turns = diar_engine.diarize(
+                audio, num_speakers=num_speakers, speech=speech,
+                min_speakers=min_speakers, max_speakers=max_speakers,
+            )
         except Exception as exc:  # noqa: BLE001
             # Loaded but blew up mid-inference — still return the transcript.
             log.warning("diarization failed (%s) — returning transcript without labels", exc)

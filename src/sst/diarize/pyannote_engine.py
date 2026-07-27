@@ -37,11 +37,19 @@ class PyannoteDiarizer(Diarizer):
         audio: np.ndarray,
         num_speakers: int | None = None,
         speech: list[tuple[float, float]] | None = None,  # unused; pyannote has its own VAD
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
     ) -> list[SpeakerTurn]:
         waveform = torch.from_numpy(audio).unsqueeze(0)
         kwargs = {}
         if num_speakers:
             kwargs["num_speakers"] = num_speakers
+        else:
+            # Only meaningful without num_speakers — pyannote rejects the combination.
+            if min_speakers:
+                kwargs["min_speakers"] = min_speakers
+            if max_speakers:
+                kwargs["max_speakers"] = max_speakers
         output = self.pipeline({"waveform": waveform, "sample_rate": SAMPLE_RATE}, **kwargs)
 
         # pyannote.audio 3.x returns an Annotation directly; 4.x (community-1)

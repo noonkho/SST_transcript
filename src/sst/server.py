@@ -369,12 +369,19 @@ def openai_transcriptions(
     temperature: float = Form(0.0),  # accepted for compatibility; unused
     diarize: bool = Form(True),
     num_speakers: int | None = Form(None),
+    # Exact speaker count is rarely known, but a floor/ceiling usually is ("this is an
+    # interview, so at least 2"). pyannote's own apply() takes both and uses them to constrain
+    # its speaker-count estimate — without them a short clip where one voice dominates collapses
+    # to a single speaker, which is what happened to the deep-test clip.
+    min_speakers: int | None = Form(None),
+    max_speakers: int | None = Form(None),
     diarization_model: str = Form(""),
     stream_progress: bool = False,   # query param: ?stream_progress=true -> NDJSON
 ):
     """OpenAI-compatible transcription. Blocks until the result is ready.
 
-    Extensions beyond OpenAI: `diarize`, `num_speakers`, `diarization_model`;
+    Extensions beyond OpenAI: `diarize`, `num_speakers`, `min_speakers`,
+    `max_speakers`, `diarization_model`;
     every JSON response includes diarized `segments`.
     """
     if response_format not in OPENAI_FORMATS:
@@ -394,6 +401,8 @@ def openai_transcriptions(
         "language": language or None,
         "diarize": diarize,
         "num_speakers": num_speakers,
+        "min_speakers": min_speakers,
+        "max_speakers": max_speakers,
         "diarization_model": diarization_model or None,
     })
     if stream_progress:
@@ -742,11 +751,15 @@ def api_transcribe(
     language: str = Form(""),
     diarize: bool = Form(True),
     num_speakers: int | None = Form(None),
+    min_speakers: int | None = Form(None),
+    max_speakers: int | None = Form(None),
 ):
     job = _submit(file, {
         "language": language or None,
         "diarize": diarize,
         "num_speakers": num_speakers,
+        "min_speakers": min_speakers,
+        "max_speakers": max_speakers,
     })
     return job.public()
 
