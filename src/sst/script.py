@@ -2,7 +2,7 @@
 
 Whisper often writes Cantonese in Simplified characters. OpenCC converts by
 phrase, not character by character, so ambiguous characters come out right
-(头发 → 頭髮 but 发展 → 發展), and keeps regional vocabulary (s2twp: 软件 → 軟體).
+(头发 → 頭髮 but 发展 → 發展). Traditional uses Hong Kong character forms (s2hk).
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ import functools
 
 SCRIPTS = {
     "traditional_hk": ("s2hk", "Traditional Chinese (Hong Kong)"),
+    # not offered in the web UI, still accepted by the API for existing clients
     "traditional_tw": ("s2twp", "Traditional Chinese (Taiwan)"),
     "simplified": ("t2s", "Simplified Chinese"),
 }

@@ -39,10 +39,10 @@ each file shows its size and length, and **✕** removes it.
 
 | Setting | What it does | Tip |
 |---|---|---|
-| **Language** | Auto-detect, Cantonese, Mandarin or English | Auto works for most files. Pick the language if the result comes out in the wrong one (for example Cantonese written as Mandarin) |
+| **Language** | Auto-detect, Cantonese, Mandarin, English, or one of 26 more languages that both Whisper and Qwen3-ASR support | Auto works for most files, including recordings that switch language. Pick one language only if the whole recording is in it |
 | **Number of speakers** | Auto-detect, or exactly 1–10 | If you *know* the number, set it — that gives the best result. If not, leave Auto |
 | **Identify speakers** | Turn speaker detection on/off | Off = plain text with no speaker names, a little faster |
-| **Chinese characters** | Keep as transcribed, or convert to Traditional (Hong Kong), Traditional (Taiwan) or Simplified | Cantonese often comes out in Simplified characters — pick **Traditional — Hong Kong** to always get 繁體 |
+| **Chinese characters** | Keep as transcribed, or convert to Traditional (Hong Kong forms) or Simplified | Cantonese often comes out in Simplified characters — pick **Traditional · 繁體（香港）** to always get 繁體 |
 
 The app remembers these settings in your browser for next time.
 
@@ -53,8 +53,28 @@ percentage), then the server works on it.
 
 How the estimate works: the server measures how fast it actually is — per model
 and per machine — on every finished job, and uses that for the next estimate.
-Until it has finished a job with the chosen model, the estimate is a rough guess
-(it says so). Upload time is not included.
+Until it has finished a recording of 2 minutes or longer with the chosen model,
+the estimate is a rough guess (it says so). Upload time is not included.
+
+### How auto-detect works
+
+- **Language:** the recording is cut at pauses into parts of up to about
+  30 seconds. On Auto-detect, the model decides the language of *each part*
+  separately. So a recording that switches language works — but a single part
+  where two languages are spoken gets one language.
+- **Number of speakers:** the speaker model turns short stretches of voice into
+  "voice prints" and groups similar ones; the number of groups is the number of
+  speakers. A very short or quiet speaker can be missed, and one voice can be
+  split in two. Setting the number makes it exact.
+
+**Example — a Cantonese speaker, an interpreter (Cantonese → Mandarin), and a
+Mandarin speaker:** set Language to **Auto-detect** and Number of speakers to
+**3**. Do *not* choose Cantonese: forcing one language makes the model write the
+Mandarin parts as Cantonese too. Use **Qwen3-ASR** for this kind of recording — it
+handles mixed Cantonese/Mandarin much better than Whisper. Check the lines where
+someone switches language mid-sentence.
+
+The **How does auto-detect work?** link under the settings shows the same help.
 
 ## Watch progress, cancel, queue
 
@@ -157,15 +177,14 @@ Do you need to transcribe again from scratch? Only if the **words** are wrong
 
 Whisper often writes Cantonese in Simplified characters (欢迎, 会). Two ways to fix it:
 
-- **Before transcribing:** set *Chinese characters* to **Traditional — Hong Kong**
-  (or Taiwan, or Simplified). Every new transcript is converted automatically.
+- **Before transcribing:** set *Chinese characters* to **Traditional · 繁體（香港）**
+  (or Simplified). Every new transcript is converted automatically.
 - **After transcribing:** open the transcript and use the **Characters → Convert to…**
   menu above it. The change is saved, and all exports use it.
 
 The conversion uses [OpenCC](https://github.com/BYVoid/OpenCC), which converts by
-phrase, not letter by letter: 头发 → 頭髮 but 发展 → 發展. The Hong Kong option uses
-Hong Kong forms (软件 → 軟件); the Taiwan option also uses Taiwan words
-(软件 → 軟體). Cantonese characters such as 我哋, 嘅 and 喺 are left as they are.
+phrase, not letter by letter: 头发 → 頭髮 but 发展 → 發展. Traditional uses Hong Kong
+character forms. Cantonese characters such as 我哋, 嘅 and 喺 are left as they are.
 
 ## Whisper or Qwen3-ASR?
 
@@ -275,7 +294,7 @@ or fix single lines with the speaker list in edit mode.
 **One person got two labels.** Rename one label to the other's name to merge.
 
 **Cantonese comes out in Simplified characters.** Set *Chinese characters* to
-Traditional — Hong Kong, or use *Convert to…* on the transcript.
+Traditional · 繁體（香港）, or use *Convert to…* on the transcript.
 
 **Cantonese comes out as written standard Chinese instead of spoken Cantonese.**
 Set Language to Cantonese, or switch to Qwen3-ASR (see above).

@@ -8,6 +8,8 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 const current = { jobId: null, filename: "", result: null, editingIdx: null, loop: null };
 let lastJobs = [];
 const isActive = (job) => job.status === "running" || job.status === "queued";
+/* icon from the SVG sprite in index.html */
+const icon = (name, cls = "") => `<svg class="icon ${cls}" aria-hidden="true"><use href="#i-${name}"/></svg>`;
 
 /* ---------------- tabs ---------------- */
 $$(".nav-item").forEach((btn) => {
@@ -35,6 +37,7 @@ async function refreshStatus() {
     $("#d-stt").textContent = s.stt_loaded || "not loaded yet";
     $("#d-diar").textContent = s.diarization_loaded || "not loaded yet";
     $("#ffmpeg-warning").style.display = s.ffmpeg ? "none" : "block";
+    if (s.languages && !$("#lang-common").children.length) fillLanguages(s.languages);
     if (s.supported_extensions) {
       supportedExt = new Set(s.supported_extensions);
       fileInput.accept = "audio/*,video/*," + s.supported_extensions.join(",");
@@ -42,6 +45,7 @@ async function refreshStatus() {
     $("#token-state").textContent = s.config.has_hf_token
       ? "✓ A token is saved." : "No token saved yet.";
     if (document.activeElement !== $("#max-jobs")) $("#max-jobs").value = s.config.max_jobs;
+    $("#jobs-limit").textContent = `Keeps the last ${s.config.max_jobs}`;
     if (document.activeElement !== $("#auth-enabled")) $("#auth-enabled").checked = s.config.auth_enabled;
     if (document.activeElement !== $("#srv-port")) $("#srv-port").value = s.config.port;
     // Don't wipe what's in the box — the user may be mid-edit, or revealed the
@@ -59,6 +63,17 @@ async function refreshStatus() {
     $("#server-label").textContent = "Server unreachable";
     return null;
   }
+}
+
+/* Language picker: built once from the server's list, then the last choice
+   saved in this browser is restored. */
+function fillLanguages(languages) {
+  for (const l of languages) {
+    LANG_NAME[l.code] = l.name;
+    const label = l.native ? `${l.name} · ${l.native}` : l.name;
+    $(l.common ? "#lang-common" : "#lang-other").appendChild(new Option(label, l.code));
+  }
+  restoreSetting("opt-language");
 }
 
 /* ---------------- small helpers ---------------- */
@@ -99,7 +114,8 @@ function fmtBytes(n) {
 /* ---------------- step 1: choose files (nothing uploads yet) ---------------- */
 const dropzone = $("#dropzone");
 const fileInput = $("#file-input");
-const staged = [];   // [{file, duration}]
+const staged = [];   // [{file, duration, estimate}]
+const DZ_TITLE = $("#dropzone .dz-title").textContent;
 
 dropzone.addEventListener("click", () => fileInput.click());
 dropzone.addEventListener("keydown", (e) => {
@@ -153,17 +169,17 @@ function renderStaged() {
   staged.forEach((item, i) => {
     const row = document.createElement("div");
     row.className = "staged-row";
-    row.innerHTML = `<span class="staged-icon">🎧</span>
+    row.innerHTML = `${icon("file", "staged-icon")}
       <span class="staged-info"><span class="staged-name"></span>
         <span class="staged-sub">${fmtBytes(item.file.size)}${item.duration ? " · " + fmtDur(item.duration) : ""}${
           item.estimate ? ` · <b>takes about ${fmtDur(item.estimate)}</b>` : ""}</span></span>
-      <button class="icon-btn" title="Remove this file" aria-label="Remove">✕</button>`;
+      <button class="icon-btn" title="Remove this file" aria-label="Remove ${escapeHtml(item.file.name)}">${icon("x")}</button>`;
     row.querySelector(".staged-name").textContent = item.file.name;
     row.querySelector("button").addEventListener("click", () => { staged.splice(i, 1); updateEstimate(); });
     box.appendChild(row);
   });
   dropzone.classList.toggle("compact", staged.length > 0);
-  $("#dropzone .dz-title").textContent = staged.length ? "Add more files" : "Drop audio or video files here";
+  $("#dropzone .dz-title").textContent = staged.length ? "Add more files" : DZ_TITLE;
   const btn = $("#start-btn");
   btn.disabled = !staged.length || uploading;
   btn.textContent = staged.length > 1 ? `Start transcribing ${staged.length} files` : "Start transcribing";
@@ -208,18 +224,29 @@ for (const sel of [$("#opt-speakers"), $("#rediarize-count")]) {
 }
 
 /* remember the last-used settings on this browser */
-for (const id of ["opt-language", "opt-speakers", "opt-script"]) {
+// the Taiwan variant is no longer offered; carry an old saved choice over
+if (store.get("opt-script") === "traditional_tw") store.set("opt-script", "traditional_hk");
+
+function restoreSetting(id) {
   const saved = store.get(id);
   if (saved !== null && [...$("#" + id).options].some((o) => o.value === saved)) $("#" + id).value = saved;
+}
+for (const id of ["opt-language", "opt-speakers", "opt-script"]) {
+  restoreSetting(id);
   $("#" + id).addEventListener("change", (e) => store.set(id, e.target.value));
 }
 if (store.get("opt-diarize") !== null) $("#opt-diarize").checked = store.get("opt-diarize") === "1";
+function syncDiarize() {
+  const on = $("#opt-diarize").checked;
+  $("#opt-speakers").disabled = !on;
+  $("#opt-diarize-text").textContent = on ? "On: lines get speaker names" : "Off: text only";
+}
 $("#opt-diarize").addEventListener("change", (e) => {
   store.set("opt-diarize", e.target.checked ? "1" : "0");
-  $("#opt-speakers").disabled = !e.target.checked;
+  syncDiarize();
   updateEstimate();
 });
-$("#opt-speakers").disabled = !$("#opt-diarize").checked;
+syncDiarize();
 
 /* ---------------- step 3: upload + start ---------------- */
 let uploading = false;
@@ -401,7 +428,7 @@ const STAGE_LABEL = {
 
 function setProgress(job) {
   const pct = Math.round((job.progress || 0) * 100);
-  $("#progress-fill").style.width = pct + "%";
+  $("#progress-fill").style.transform = `scaleX(${pct / 100})`;
   $("#progress-pct").textContent = pct + "%";
   $("#progress-stage").textContent = STAGE_LABEL[job.stage] || job.stage || "";
   let detail = job.detail || "";
@@ -874,7 +901,8 @@ function escapeHtml(s) {
 }
 
 /* ---------------- job history ---------------- */
-const LANG_NAME = { yue: "Cantonese", zh: "Mandarin", en: "English" };
+// code -> "Cantonese", "Japanese", … (filled with the language list from /api/status)
+const LANG_NAME = {};
 
 function fmtWhen(epoch) {
   if (!epoch) return "";
@@ -921,7 +949,7 @@ async function refreshJobs() {
         <div class="job-name"></div>
         <div class="job-meta"><span class="job-status ${job.status}">${statusText}</span>
           <span class="job-sub"></span></div>
-        ${job.status === "running" ? `<div class="job-bar"><div style="width:${Math.round(job.progress * 100)}%"></div></div>` : ""}
+        ${job.status === "running" ? `<div class="job-bar"><div style="transform:scaleX(${job.progress})"></div></div>` : ""}
       </div>
       <button class="icon-btn danger job-act"></button>`;
     row.querySelector(".job-name").textContent = job.filename;
@@ -929,13 +957,13 @@ async function refreshJobs() {
     row.querySelector(".job-sub").textContent = jobMeta(job);
     const btn = row.querySelector(".job-act");
     if (active) {
-      btn.textContent = "■";
+      btn.innerHTML = icon("stop");
       btn.title = "Cancel this job";
       btn.setAttribute("aria-label", "Cancel " + job.filename);
       btn.disabled = job.cancel_requested;
       btn.addEventListener("click", (e) => { e.stopPropagation(); cancelJob(job.id); });
     } else {
-      btn.textContent = "🗑";
+      btn.innerHTML = icon("trash");
       btn.title = "Delete this job (audio + transcript)";
       btn.setAttribute("aria-label", "Delete " + job.filename);
       btn.addEventListener("click", (e) => { e.stopPropagation(); deleteJob(job); });

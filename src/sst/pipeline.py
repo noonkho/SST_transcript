@@ -78,7 +78,7 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     job.check_cancelled()
 
     # speed ratios are per second of *file* (what estimates before upload know)
-    stt_estimate = speed.stage_seconds("stt", stt_repo_used, total)
+    stt_estimate, _ = speed.stage_seconds("stt", stt_repo_used, total)
     turns: list[SpeakerTurn] = []
     diar_seconds = 0.0
     if diar_engine and chunks:
@@ -184,7 +184,7 @@ def _diarize(job: Job, engine, audio: np.ndarray, speech: list[tuple[float, floa
     """
     params = job.params
     job.stage = "diarizing"
-    expected = speed.stage_seconds("diar", diar_repo or "", job.audio_duration)
+    expected, _ = speed.stage_seconds("diar", diar_repo or "", job.audio_duration)
     job.eta_seconds = expected + then_seconds
 
     def progress(frac: float) -> None:

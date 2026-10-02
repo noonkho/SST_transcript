@@ -71,6 +71,18 @@ def whisper_languages() -> list[str]:
 SENSEVOICE_LANGUAGES = ["en", "ja", "ko", "yue", "zh"]
 
 
+def ui_languages() -> list[dict]:
+    """Languages for the web UI picker: those Whisper and Qwen3-ASR both support,
+    Cantonese / Mandarin / English first, then by English name."""
+    from .registry import LANGUAGE_NAMES, QWEN3_ASR_LANGUAGES
+    common = set(QWEN3_ASR_LANGUAGES) & set(whisper_languages())
+    first = ["yue", "zh", "en"]
+    rest = sorted((c for c in common if c not in first and c in LANGUAGE_NAMES),
+                  key=lambda c: LANGUAGE_NAMES[c][0])
+    return [{"code": c, "name": LANGUAGE_NAMES[c][0], "native": LANGUAGE_NAMES[c][1],
+             "common": c in first} for c in first + rest if c in common]
+
+
 def languages_for(engine: str) -> list[str]:
     if engine == "whisper":
         return whisper_languages()

@@ -8,6 +8,16 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M15.5 4.6a3.5 3.5 0 0 1 0 6.8M18 14.2A6.5 6.5 0 0 1 21.5 20"/></symbol>
+  </defs>
+</svg>
 <div class="window">
   <aside class="sidebar">
     <div class="app-title">
@@ -36,50 +46,71 @@
       <h1>Transcribe</h1>
       <div class="transcribe-grid">
       <div class="transcribe-main">
-      <div class="card" id="upload-card">
-        <div class="step-title"><span class="step-num">1</span> Choose audio or video files</div>
-        <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose audio files">
-          <div class="dz-icon">⬆️</div>
-          <div class="dz-title">Drop audio or video files here</div>
-          <div class="dz-sub">or click to choose — mp3, m4a, wav, flac, mp4, mov &amp; more · several files at once is fine</div>
+      <div class="card new-job" id="upload-card">
+        <h2 class="step-title"><span class="step-tag">Step 1:</span> Choose audio or video files</h2>
+        <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose audio or video files">
+          <svg class="icon dz-icon" aria-hidden="true"><use href="#i-upload"/></svg>
+          <div class="dz-title">Drop files here, or click to choose</div>
+          <div class="dz-sub">mp3, m4a, wav, flac, mp4, mov and more · several files at once is fine</div>
           <input type="file" id="file-input" accept="audio/*,video/*,.m4a,.mp3,.wav,.flac,.ogg,.opus,.aac,.wma,.mp4,.mov,.mkv,.webm,.aiff,.aif,.caf,.amr,.3gp" multiple hidden>
         </div>
         <div id="staged-list" class="staged-list"></div>
 
-        <div class="step-title"><span class="step-num">2</span> Settings</div>
-        <div class="options-row">
-          <label>Language
+        <h2 class="step-title"><span class="step-tag">Step 2:</span> Settings</h2>
+        <div class="settings-grid">
+          <div class="field">
+            <label for="opt-language">Language</label>
             <select id="opt-language">
               <option value="">Auto-detect</option>
-              <option value="yue">Cantonese 粵語</option>
-              <option value="zh">Mandarin 普通話</option>
-              <option value="en">English</option>
+              <!-- filled from /api/status: languages Whisper and Qwen3-ASR both support -->
+              <optgroup label="Most used" id="lang-common"></optgroup>
+              <optgroup label="Other languages" id="lang-other"></optgroup>
             </select>
-          </label>
-          <label>Number of speakers
+            <p class="field-help">Auto-detect checks every part of about 30 seconds on its own, so recordings that switch language work.</p>
+          </div>
+          <div class="field">
+            <label for="opt-speakers">Number of speakers</label>
             <select id="opt-speakers">
               <option value="">Auto-detect</option>
             </select>
-          </label>
-          <label class="toggle-label">Identify speakers
-            <input type="checkbox" id="opt-diarize" checked class="toggle">
-          </label>
-          <label>Chinese characters
+            <p class="field-help">Set it if you know it. If Auto-detect gets it wrong, use <b>Re-detect speakers</b> on the transcript.</p>
+          </div>
+          <div class="field">
+            <label for="opt-script">Chinese characters</label>
             <select id="opt-script">
               <option value="">Keep as transcribed</option>
-              <option value="traditional_hk">Traditional — Hong Kong 繁體（香港）</option>
-              <option value="traditional_tw">Traditional — Taiwan 繁體（台灣）</option>
-              <option value="simplified">Simplified 简体</option>
+              <option value="traditional_hk">Traditional · 繁體（香港）</option>
+              <option value="simplified">Simplified · 简体</option>
             </select>
-          </label>
+            <p class="field-help">Cantonese sometimes comes out in Simplified characters. Choose Traditional to always get 繁體.</p>
+          </div>
+          <div class="field">
+            <label for="opt-diarize">Identify speakers</label>
+            <span class="toggle-row"><input type="checkbox" id="opt-diarize" checked class="toggle">
+              <span class="toggle-text" id="opt-diarize-text"></span></span>
+            <p class="field-help">Off gives plain text without names, a little faster.</p>
+          </div>
         </div>
-        <div class="hint">Not sure how many people talk? Leave it on <b>Auto-detect</b>. If the count comes
-          out wrong, use <b>Re-detect speakers</b> on the transcript — no need to transcribe again. Cantonese sometimes comes out in Simplified
-          characters — pick <b>Traditional — Hong Kong</b> to always get 繁體.</div>
 
-        <div class="start-row">
+        <details class="explain">
+          <summary>How does auto-detect work? What about mixed-language recordings?</summary>
+          <div class="explain-body">
+            <p><b>Language.</b> The recording is cut at pauses into parts of up to about 30 seconds.
+              On Auto-detect, the model decides the language of <i>each part</i> separately.</p>
+            <p><b>Speakers.</b> The speaker model turns short stretches of voice into “voice prints” and groups
+              similar ones. It counts the groups, so a quiet or very short speaker can be missed,
+              and one voice in two moods can be split in two. Setting the number makes it exact.</p>
+            <p><b>Example: a Cantonese speaker, an interpreter into Mandarin, and a Mandarin speaker.</b>
+              Leave Language on <b>Auto-detect</b> and set <b>Number of speakers</b> to 3.
+              Choosing Cantonese would force the Mandarin parts to be written as Cantonese too.
+              For mixed Cantonese/Mandarin, the <b>Qwen3-ASR</b> model (Models tab) is clearly better than Whisper.
+              A part where both languages are spoken gets one language, so check those lines.</p>
+          </div>
+        </details>
+
+        <div class="start-bar">
+          <p class="start-hint" id="start-hint" role="status">Choose a file first.</p>
           <button class="btn primary large" id="start-btn" disabled>Start transcribing</button>
-          <span class="hint" id="start-hint" style="margin:0">Choose a file first.</span>
         </div>
       </div>
 
@@ -110,9 +141,8 @@
             <label class="inline-label" title="Convert all Chinese characters in this transcript">Characters
               <select id="convert-script">
                 <option value="">Convert to…</option>
-                <option value="traditional_hk">繁體 (Hong Kong)</option>
-                <option value="traditional_tw">繁體 (Taiwan)</option>
-                <option value="simplified">简体 (Simplified)</option>
+                <option value="traditional_hk">Traditional · 繁體</option>
+                <option value="simplified">Simplified · 简体</option>
               </select>
             </label>
             <button class="btn" data-dl="json">JSON</button>
@@ -126,7 +156,7 @@
         <audio id="player" controls preload="metadata"></audio>
         <div class="speaker-row">
           <div class="speaker-bar" id="speaker-bar"></div>
-          <button class="btn small" id="rediarize-open" title="Run speaker detection again with a different number of speakers">👥 Re-detect speakers</button>
+          <button class="btn small" id="rediarize-open" title="Run speaker detection again with a different number of speakers"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg> Re-detect speakers</button>
         </div>
         <div class="rediarize-panel hidden" id="rediarize-panel">
           <label>How many speakers?
@@ -136,7 +166,7 @@
           </label>
           <button class="btn primary small" id="rediarize-go">Re-detect</button>
           <button class="btn small" id="rediarize-cancel">Close</button>
-          <div class="hint" style="flex-basis:100%;margin:0">Only the speaker labels change — the text and your
+          <div class="hint" style="flex-basis:100%;margin:0">Only the speaker labels change. The text and your
             text edits stay. It runs as a new job (much faster than transcribing again) and the
             original transcript is kept. Too <i>many</i> speakers? You can also merge two by renaming
             one to the other's name.</div>
@@ -152,7 +182,10 @@
 
       <div class="transcribe-side">
       <div class="card" id="history-card">
-        <h2>Recent jobs</h2>
+        <div class="card-head">
+          <h2>Recent jobs</h2>
+          <span class="card-note" id="jobs-limit"></span>
+        </div>
         <div id="job-list" class="job-list"><div class="empty">No jobs yet</div></div>
       </div>
       </div><!-- /transcribe-side -->
@@ -196,9 +229,9 @@
           <div class="btn-group">
             <label class="inline-label">Request lines
               <select id="log-mode">
-                <option value="quiet">Quiet — hide routine page refreshes</option>
-                <option value="full">Full — every request</option>
-                <option value="off">Off — no request lines</option>
+                <option value="quiet">Quiet: hide routine page refreshes</option>
+                <option value="full">Full: every request</option>
+                <option value="off">Off: no request lines</option>
               </select>
             </label>
             <button class="btn small" id="log-refresh">Refresh</button>

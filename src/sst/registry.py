@@ -150,6 +150,22 @@ DIARIZATION_CATALOG: list[CatalogEntry] = [
 
 CATALOG: list[CatalogEntry] = STT_CATALOG + DIARIZATION_CATALOG
 
+# Language picker in the web UI: English name + own name. Only languages both
+# Whisper and Qwen3-ASR understand are offered (see ui_languages()).
+LANGUAGE_NAMES = {
+    "yue": ("Cantonese", "粵語"), "zh": ("Mandarin", "普通話"), "en": ("English", ""),
+    "ar": ("Arabic", "العربية"), "cs": ("Czech", "Čeština"), "da": ("Danish", "Dansk"),
+    "nl": ("Dutch", "Nederlands"), "fi": ("Finnish", "Suomi"), "fr": ("French", "Français"),
+    "de": ("German", "Deutsch"), "el": ("Greek", "Ελληνικά"), "hi": ("Hindi", "हिन्दी"),
+    "hu": ("Hungarian", "Magyar"), "id": ("Indonesian", "Bahasa Indonesia"),
+    "it": ("Italian", "Italiano"), "ja": ("Japanese", "日本語"), "ko": ("Korean", "한국어"),
+    "mk": ("Macedonian", "Македонски"), "ms": ("Malay", "Bahasa Melayu"),
+    "fa": ("Persian", "فارسی"), "pl": ("Polish", "Polski"), "pt": ("Portuguese", "Português"),
+    "ro": ("Romanian", "Română"), "ru": ("Russian", "Русский"), "es": ("Spanish", "Español"),
+    "sv": ("Swedish", "Svenska"), "th": ("Thai", "ไทย"), "tr": ("Turkish", "Türkçe"),
+    "vi": ("Vietnamese", "Tiếng Việt"),
+}
+
 # Language codes (as used in the API) -> Qwen3-ASR's language names.
 QWEN3_ASR_LANGUAGES = {
     "zh": "Chinese", "en": "English", "yue": "Cantonese", "ar": "Arabic", "de": "German",

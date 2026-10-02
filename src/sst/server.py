@@ -59,6 +59,7 @@ from .openai_compat import (
     error_body,
     model_entry,
     type_for_status,
+    ui_languages,
 )
 from .jobs import AUDIO_DIR, jobs
 from .manager import manager
@@ -194,7 +195,7 @@ async def auth_gate(request: Request, call_next):
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page():
-    return (STATIC_DIR / "login.html").read_text()
+    return _html_page("login.html")
 
 
 @app.post("/login")
@@ -398,7 +399,7 @@ def openai_transcriptions(
     min_speakers: int | None = Form(None),
     max_speakers: int | None = Form(None),
     diarization_model: str = Form(""),
-    # traditional_hk | traditional_tw | simplified — convert Chinese characters
+    # traditional_hk | simplified — convert Chinese characters
     chinese_script: str = Form(""),
     stream_progress: bool = False,   # query param: ?stream_progress=true -> NDJSON
 ):
@@ -503,6 +504,7 @@ def api_status():
         "running": True,
         "ffmpeg": ffmpeg_available(),
         "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
+        "languages": ui_languages(),
         **manager.status(),
         "config": {
             "stt_model": config.stt_model,
@@ -863,7 +865,7 @@ def api_job_rediarize(job_id: str, body: dict):
 
 @app.post("/api/jobs/{job_id}/convert")
 def api_job_convert(job_id: str, body: dict):
-    """Convert a finished transcript to Traditional (HK/TW) or Simplified Chinese.
+    """Convert a finished transcript to Traditional (Hong Kong) or Simplified Chinese.
     Saved like an edit, so exports and the editor show the converted text."""
     job = jobs.get(job_id)
     if not job or job.status != "done" or not job.result:
@@ -1019,9 +1021,13 @@ def api_job_download(job_id: str, format: str = "json"):
 
 # ---------------------------------------------------------------- static UI
 
+def _html_page(name: str) -> HTMLResponse:
+    return HTMLResponse((STATIC_DIR / name).read_text(), headers={"Cache-Control": "no-cache"})
+
+
 @app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def index():
-    return (STATIC_DIR / "index.html").read_text()
+    return _html_page("index.html")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -1029,4 +1035,16 @@ def favicon():
     return FileResponse(STATIC_DIR / "favicon.svg", media_type="image/svg+xml")
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+class _RevalidatingStatic(StaticFiles):
+    """Static files that browsers must re-check before reuse ("no-cache").
+    Without a Cache-Control header browsers guessed a freshness time from
+    Last-Modified and kept showing old CSS/JS after an update. Re-checking is
+    cheap: an unchanged file answers 304 Not Modified via its ETag."""
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidatingStatic(directory=STATIC_DIR), name="static")

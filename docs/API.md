@@ -20,7 +20,7 @@ Multipart form fields:
 | `diarize` | `true` | *(SST extension)* speaker diarization on/off |
 | `num_speakers` | auto | *(SST extension)* exact number of speakers, if known |
 | `min_speakers` / `max_speakers` | auto | *(SST extension)* bounds for the automatic speaker count (ignored when `num_speakers` is set) |
-| `chinese_script` | keep | *(SST extension)* `traditional_hk`, `traditional_tw` or `simplified` — convert Chinese characters in the result (OpenCC) |
+| `chinese_script` | keep | *(SST extension)* `traditional_hk` or `simplified` (`traditional_tw` is also accepted) — convert Chinese characters in the result (OpenCC) |
 | `diarization_model` | server default | *(SST extension)* diarization model id |
 
 ```bash
@@ -260,7 +260,7 @@ The web UI's own `/api/*` endpoints are unchanged — they keep FastAPI's
 | `GET /api/jobs/{id}` | Job status, progress, ETA, and result |
 | `GET /api/jobs/{id}/events` | Server-sent events stream of progress |
 | `POST /api/jobs/{id}/cancel` | Cancel a queued or running job (a running job stops within ~1–3 s) |
-| `POST /api/jobs/{id}/convert` | Convert a finished transcript's Chinese characters: body `{"script": "traditional_hk"}` (`traditional_tw`, `simplified`). Saved like an edit |
+| `POST /api/jobs/{id}/convert` | Convert a finished transcript's Chinese characters: body `{"script": "traditional_hk"}` (or `simplified`, `traditional_tw`). Saved like an edit |
 | `GET /api/estimate?seconds=1200&diarize=true` | Expected processing time for that much audio: `{"seconds", "learned", "queue_seconds"}`. `learned` is false until this server has measured the model; `queue_seconds` is work already queued |
 | `POST /api/jobs/{id}/rediarize` | Re-detect speakers of a finished job: body `{"num_speakers": 4}` (or `min_speakers` / `max_speakers`, or `{}` for auto). Creates a **new** job; only the diarizer runs, the text is reused |
 | `DELETE /api/jobs/{id}` | Delete a finished job (transcript + audio) |
