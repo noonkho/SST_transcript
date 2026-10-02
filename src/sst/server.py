@@ -36,7 +36,7 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 
-from . import __version__
+from . import __version__, logs
 from .audio import SUPPORTED_EXTENSIONS, ffmpeg_available
 from .auth import (
     COOKIE_NAME,
@@ -61,11 +61,11 @@ from .openai_compat import (
 )
 from .jobs import jobs
 from .manager import manager
-from .pipeline import run_transcription
+from .pipeline import run_rediarization, run_transcription
 from .registry import CATALOG, DIARIZATION_CATALOG, STT_CATALOG, classify_hf_model, find_entry
 
 log = logging.getLogger("sst.server")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logs.setup()
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -486,6 +486,7 @@ def api_status():
             "max_jobs": config.clamped_max_jobs(),
             "auth_enabled": config.auth_enabled,
             "has_api_key": bool(config.api_key),
+            "access_log": config.access_log,
         },
     }
 
@@ -600,6 +601,11 @@ def api_config(body: dict):
         except (TypeError, ValueError):
             raise HTTPException(400, "max_jobs must be a number between 3 and 20") from None
         jobs.enforce_limit()
+
+    if "access_log" in body:
+        if body["access_log"] not in logs.ACCESS_MODES:
+            raise HTTPException(400, f"access_log must be one of {list(logs.ACCESS_MODES)}")
+        config.access_log = body["access_log"]
 
     # api_key
     if "api_key" in body:
@@ -795,6 +801,75 @@ def api_job_delete(job_id: str):
     return {"ok": True}
 
 
+@app.post("/api/jobs/{job_id}/rediarize")
+def api_job_rediarize(job_id: str, body: dict):
+    """Re-detect speakers of a finished job with a new speaker count.
+
+    Runs only the diarizer and re-assigns the existing words, so it takes a
+    fraction of a full transcription. The result is a NEW job (the original
+    stays untouched); text edits are kept, speaker names/colours are reset.
+    """
+    src = jobs.get(job_id)
+    if not src or src.status != "done" or not src.result:
+        raise HTTPException(404, "no finished result for this job")
+    if not src.audio_path or not Path(src.audio_path).exists():
+        raise HTTPException(409, "this job's audio is no longer stored — transcribe the file again")
+
+    def count(key: str) -> int | None:
+        value = body.get(key)
+        if value in (None, "", 0):
+            return None
+        try:
+            n = int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"{key} must be a whole number") from None
+        if not 1 <= n <= 20:
+            raise HTTPException(400, f"{key} must be between 1 and 20")
+        return n
+
+    params = {
+        "language": src.params.get("language"),
+        "diarize": True,
+        "num_speakers": count("num_speakers"),
+        "min_speakers": count("min_speakers"),
+        "max_speakers": count("max_speakers"),
+        "rediarize_from": src.id,
+    }
+    source = json.loads(json.dumps(src.result))  # snapshot: later edits to src don't leak in
+    suffix = Path(src.audio_path).suffix
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="sst_")
+    tmp.close()
+    shutil.copyfile(src.audio_path, tmp.name)
+
+    def work(job):
+        return run_rediarization(job, job.audio_path, source)
+
+    job = jobs.submit(filename=src.filename, params=params, fn=work, audio_src=tmp.name)
+    return job.public()
+
+
+# ------------------------------------------------------------------- logs
+
+@app.get("/api/logs")
+def api_logs(lines: int = 300):
+    return {"lines": logs.tail(max(1, min(lines, 500))), "access_log": config.access_log,
+            "file": str(logs.LOG_FILE)}
+
+
+@app.post("/api/logs/clear")
+def api_logs_clear():
+    logs.clear()
+    return {"ok": True}
+
+
+@app.get("/api/logs/download")
+def api_logs_download():
+    if not logs.LOG_FILE.exists():
+        raise HTTPException(404, "no log file yet")
+    return FileResponse(logs.LOG_FILE, media_type="text/plain",
+                        headers=_attachment_headers("sst.log"))
+
+
 # Browser-friendly types where mimetypes guesses poorly (.m4a → audio/mp4a-latm).
 _AUDIO_MIME = {".m4a": "audio/mp4", ".aac": "audio/aac", ".opus": "audio/ogg", ".caf": "audio/x-caf"}
 
@@ -824,12 +899,22 @@ def api_job_update_result(job_id: str, body: dict):
             # speaker may be null — no diarization ran, or the editor left the
             # line unassigned. Keep it null rather than coercing to "None".
             speaker = seg.get("speaker")
-            cleaned.append({
+            item = {
                 "start": round(float(seg["start"]), 3),
                 "end": round(float(seg["end"]), 3),
                 "speaker": str(speaker)[:80] if speaker else None,
                 "text": str(seg["text"]),
-            })
+            }
+            # Word timings survive edits that keep the line's text (renames,
+            # speaker changes); the editor drops them when the text changes.
+            # They power verbose_json and "Re-detect speakers".
+            if isinstance(seg.get("words"), list):
+                item["words"] = [
+                    {"word": str(w["word"]), "start": round(float(w["start"]), 3),
+                     "end": round(float(w["end"]), 3)}
+                    for w in seg["words"]
+                ]
+            cleaned.append(item)
         except (KeyError, TypeError, ValueError):
             raise HTTPException(400, "each segment needs start, end, speaker, text") from None
     cleaned.sort(key=lambda s: s["start"])
@@ -886,7 +971,7 @@ def api_job_download(job_id: str, format: str = "json"):
 
 # ---------------------------------------------------------------- static UI
 
-@app.get("/", response_class=HTMLResponse)
+@app.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 def index():
     return (STATIC_DIR / "index.html").read_text()
 

@@ -3,14 +3,31 @@
 from __future__ import annotations
 
 import warnings
+from typing import Callable
 
 import numpy as np
 import torch
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from transformers import (
+    AutoModelForSpeechSeq2Seq,
+    AutoProcessor,
+    StoppingCriteria,
+    StoppingCriteriaList,
+    pipeline,
+)
 
 # The ASR pipeline passes return_token_timestamps internally for word
 # timestamps; transformers warns it will change in v5 (we pin <5).
 warnings.filterwarnings("ignore", message=".*return_token_timestamps.*")
+
+# The ASR pipeline imports torchcodec on *every* call just to check whether
+# the input is a torchcodec decoder. When torchcodec can't load its native
+# libraries (e.g. Homebrew moved to an ffmpeg major version it doesn't
+# support yet) that import raises and every transcription fails. We only ever
+# pass in-memory arrays (ffmpeg decoding happens in sst.audio), so tell the
+# pipeline torchcodec is absent.
+import transformers.pipelines.automatic_speech_recognition as _asr_pipeline  # noqa: E402
+
+_asr_pipeline.is_torchcodec_available = lambda: False
 
 from ..audio import SAMPLE_RATE
 from ..config import config
@@ -54,10 +71,17 @@ class WhisperEngine(SttEngine):
         except Exception:
             return ""
 
-    def transcribe_chunk(self, audio: np.ndarray, language: str | None) -> list[SttSegment]:
+    def transcribe_chunk(
+        self, audio: np.ndarray, language: str | None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> list[SttSegment]:
         generate_kwargs: dict = {"task": "transcribe"}
         if language and language != "auto" and self.is_multilingual:
             generate_kwargs["language"] = language
+        if should_stop is not None:
+            # checked after every generated token, so Cancel takes effect in
+            # well under a second even on a slow machine
+            generate_kwargs["stopping_criteria"] = StoppingCriteriaList([_StopWhen(should_stop)])
 
         result = self.pipe(
             {"array": audio, "sampling_rate": SAMPLE_RATE},
@@ -83,3 +107,12 @@ class WhisperEngine(SttEngine):
         seg_start = words[0].start if words else 0.0
         seg_end = words[-1].end if words else duration
         return [SttSegment(start=seg_start, end=seg_end, text=text, words=words)]
+
+
+class _StopWhen(StoppingCriteria):
+    def __init__(self, should_stop: Callable[[], bool]) -> None:
+        self.should_stop = should_stop
+
+    def __call__(self, input_ids: torch.LongTensor, scores, **kwargs) -> torch.BoolTensor:
+        return torch.full((input_ids.shape[0],), bool(self.should_stop()),
+                          dtype=torch.bool, device=input_ids.device)

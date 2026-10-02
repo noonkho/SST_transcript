@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import faulthandler
+import logging
+import signal
+
 import uvicorn
 
+from . import logs
 from .config import config
 from .server import app
 
@@ -25,7 +30,8 @@ class WebServer:
         last_good_port = config.port
         while not self._stop:
             attempted_port = config.port   # snapshot: the port THIS iteration binds to
-            cfg = uvicorn.Config(app, host=config.host, port=attempted_port, log_level="info")
+            cfg = uvicorn.Config(app, host=config.host, port=attempted_port, log_level="info",
+                                 log_config=logs.logging_config())
             self._server = uvicorn.Server(cfg)
             try:
                 self._server.run()             # blocks until should_exit
@@ -40,7 +46,8 @@ class WebServer:
                 # calling sys.exit(1) internally, which raises SystemExit here
                 # instead of propagating an OSError. Catch both and revert
                 # rather than letting the whole process die.
-                print(f"[web] cannot bind port {attempted_port}: {e}; reverting to {last_good_port}")
+                logging.getLogger("sst.web").error(
+                    "cannot bind port %s: %s; reverting to %s", attempted_port, e, last_good_port)
                 config.port = last_good_port
                 config.save()
                 continue
@@ -50,6 +57,9 @@ web = WebServer()
 
 
 def main() -> None:
+    # `kill -USR1 <pid>` prints every thread's stack — for diagnosing a hang.
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     web.run_forever()
 
 

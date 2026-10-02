@@ -10,9 +10,9 @@ import numpy as np
 from .audio import decode_audio, duration_seconds
 from .config import config
 from .diarize.base import SpeakerTurn
-from .jobs import Job
+from .jobs import Job, JobCancelled
 from .manager import manager
-from .stt.base import SttSegment
+from .stt.base import SttSegment, Word
 from .vad import detect_speech, pack_chunks
 
 log = logging.getLogger("sst.pipeline")
@@ -32,9 +32,6 @@ def run_transcription(job: Job, audio_path: str) -> dict:
 def _run_locked(job: Job, audio_path: str) -> dict:
     params = job.params
     language = params.get("language") or None
-    num_speakers = params.get("num_speakers") or None
-    min_speakers = params.get("min_speakers") or None
-    max_speakers = params.get("max_speakers") or None
     diarize = params.get("diarize", True)
     stt_model = params.get("model") or None
     diar_model = params.get("diarization_model") or None
@@ -84,22 +81,8 @@ def _run_locked(job: Job, audio_path: str) -> dict:
 
     turns: list[SpeakerTurn] = []
     if diar_engine and chunks:
-        job.stage = "diarizing"
-        try:
-            turns = diar_engine.diarize(
-                audio, num_speakers=num_speakers, speech=speech,
-                min_speakers=min_speakers, max_speakers=max_speakers,
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Loaded but blew up mid-inference — still return the transcript.
-            log.warning("diarization failed (%s) — returning transcript without labels", exc)
-            warnings.append({
-                "code": "diarization_unavailable",
-                "message": f"Diarization model {diar_repo_used} failed: {exc}. Segments "
-                           "processed without speaker labels. Segments[].speaker is null.",
-            })
-            turns = []
-            diar_repo_used = None
+        turns, diar_repo_used = _diarize(job, diar_engine, diar_repo_used, audio, speech,
+                                         W_LOAD + W_DECODE, W_DIAR, warnings)
     job.progress = W_LOAD + W_DECODE + W_DIAR
     job.check_cancelled()
 
@@ -115,7 +98,13 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     for i, chunk in enumerate(chunks):
         job.check_cancelled()
         t0 = time.time()
-        for seg in stt.transcribe_chunk(chunk.audio, language):
+        try:
+            chunk_segments = stt.transcribe_chunk(chunk.audio, language,
+                                                  should_stop=lambda: job.cancel_requested)
+        except Exception:
+            job.check_cancelled()  # a chunk cut short by Cancel may fail to decode
+            raise
+        for seg in chunk_segments:
             seg.start += chunk.start
             seg.end = min(seg.end + chunk.start, total)
             for w in seg.words:
@@ -123,6 +112,7 @@ def _run_locked(job: Job, audio_path: str) -> dict:
                 w.end += chunk.start
             segments.append(seg)
             detected_language = detected_language or seg.language
+        job.check_cancelled()  # a stopped chunk is partial — never keep it
         chunk_times.append(time.time() - t0)
         processed_audio += chunk.end - chunk.start
         job.chunks_done = i + 1
@@ -157,6 +147,120 @@ def _run_locked(job: Job, audio_path: str) -> dict:
         "diarization_model": diar_repo_used if turns else None,
         "warnings": warnings,
     }
+
+
+def _diarize(job: Job, engine, repo: str | None, audio: np.ndarray,
+             speech: list[tuple[float, float]], base: float, weight: float,
+             warnings: list[dict]) -> tuple[list[SpeakerTurn], str | None]:
+    """Run the diarizer with live progress and cancellation.
+
+    `progress(frac)` is called by the engine from inside its loops; it raises
+    JobCancelled when the user pressed Cancel, so a long diarization stops
+    within a second instead of only after it finishes. Any other failure
+    degrades to "no speaker labels" instead of losing the transcript.
+    """
+    params = job.params
+    job.stage = "diarizing"
+
+    def progress(frac: float) -> None:
+        job.progress = base + weight * min(max(frac, 0.0), 1.0)
+        job.check_cancelled()
+
+    try:
+        turns = engine.diarize(
+            audio, num_speakers=params.get("num_speakers") or None, speech=speech,
+            min_speakers=params.get("min_speakers") or None,
+            max_speakers=params.get("max_speakers") or None,
+            progress=progress,
+        )
+        return turns, repo
+    except JobCancelled:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Loaded but blew up mid-inference — still return the transcript.
+        log.warning("diarization failed (%s) — returning transcript without labels", exc)
+        warnings.append({
+            "code": "diarization_unavailable",
+            "message": f"Diarization model {repo} failed: {exc}. Segments "
+                       "processed without speaker labels. Segments[].speaker is null.",
+        })
+        return [], None
+
+
+def run_rediarization(job: Job, audio_path: str, source: dict) -> dict:
+    """Re-detect speakers for a finished transcript without re-running speech-to-text.
+
+    Only the diarizer runs (minutes faster than a full transcription); the words
+    and timings from `source` (the earlier result) are re-assigned to the new
+    speaker turns. Used when the first run guessed the wrong number of speakers.
+    """
+    with manager.engines_lock:
+        params = job.params
+        warnings: list[dict] = []
+        job.stage = "loading models"
+        manager.ensure_loaded(diar_repo=params.get("diarization_model") or None,
+                              load_stt=False, load_diar=True)
+        engine, repo = manager.diar_engine, manager.diar_repo
+        job.progress = W_LOAD
+        job.check_cancelled()
+
+        job.stage = "decoding"
+        audio = decode_audio(audio_path)
+        job.audio_duration = duration_seconds(audio)
+        job.progress = 0.15
+        job.check_cancelled()
+        speech = detect_speech(audio)
+        job.check_cancelled()
+
+        turns, repo = _diarize(job, engine, repo, audio, speech, 0.2, 0.75, warnings)
+        if not turns:
+            raise RuntimeError(warnings[0]["message"] if warnings else
+                               "The diarizer found no speech in this audio.")
+
+        job.stage = "finalizing"
+        segments = _merge_speakers(_segments_from_result(source.get("segments") or []), turns)
+        result = {k: v for k, v in source.items()
+                  if k not in ("segments", "speakers", "speaker_colors", "edited", "warnings")}
+        result.update({
+            "segments": segments,
+            "speakers": sorted({s["speaker"] for s in segments if s["speaker"]}) or None,
+            "text": " ".join(s["text"] for s in segments).strip(),
+            "diarization_model": repo,
+            "warnings": warnings,
+        })
+        return result
+
+
+def _segments_from_result(segments: list[dict]) -> list[SttSegment]:
+    """Rebuild STT segments from a stored result so speakers can be re-assigned.
+
+    Word timings are used when they still match the line's text; a line whose
+    text was edited (or that comes from an older result with incomplete word
+    lists) is kept whole and given to the speaker who talks most during it.
+    """
+    out: list[SttSegment] = []
+    for seg in segments:
+        text = str(seg.get("text") or "").strip()
+        if not text:
+            continue
+        stored = seg.get("words") or []
+        words: list[Word] = []
+        if len(stored) > 1 and _squash("".join(w.get("word", "") for w in stored)) == _squash(text):
+            prev = ""
+            for w in stored:
+                token = str(w["word"])
+                # stored words are stripped; restore the space between Latin words
+                if prev and not _is_cjk_boundary(prev, token):
+                    token = " " + token
+                words.append(Word(start=float(w["start"]), end=float(w["end"]), text=token))
+                prev = str(w["word"])
+        out.append(SttSegment(start=float(seg["start"]), end=float(seg["end"]),
+                              text=text, words=words))
+    return out
+
+
+def _squash(text: str) -> str:
+    return "".join(text.split())
 
 
 def _speaker_at(turns: list[SpeakerTurn], start: float, end: float) -> str | None:
@@ -208,6 +312,7 @@ def _merge_speakers(segments: list[SttSegment], turns: list[SpeakerTurn]) -> lis
             merged[-1]["end"] = seg["end"]
             joiner = "" if _is_cjk_boundary(merged[-1]["text"], seg["text"]) else " "
             merged[-1]["text"] = (merged[-1]["text"] + joiner + seg["text"]).strip()
+            merged[-1]["words"] = merged[-1]["words"] + seg["words"]
         else:
             merged.append(dict(seg))
     return merged

@@ -1,130 +1,203 @@
 # SST — Local Speech-to-Text with Speaker Diarization
 
-A **100% local, offline** speech-to-text service with **speaker diarization**, built for
-**Cantonese (粵語), Mandarin (普通話), English, and code-switching** between them.
+Turn recordings into **text with speaker names and timestamps** — on your own
+computer. Built for **Cantonese (粵語), Mandarin (普通話), English, and mixes of
+them**. No audio ever leaves your machine.
 
-Runs as a 24/7 server with an **OpenAI-compatible REST API** and a clean, macOS-style
-web UI. No audio ever leaves your machine.
+You get a web app (drag in a file, read, play, fix, export to Word) and an
+**OpenAI-compatible API** for other programs.
 
 | | |
 |---|---|
-| **Languages** | Cantonese, Mandarin, English (+ 96 more via Whisper), auto-detected with manual override |
-| **Diarization** | pyannote community-1 (best open-source quality, free HF token) or built-in ungated fallback |
-| **Input** | mp3, m4a, wav, flac, ogg, mp4, mov … anything ffmpeg reads; drag & drop or API |
-| **Output** | JSON `{start, end, speaker, text}`, WebVTT, SRT, plain text, Word (.docx) table |
-| **Editing** | Karaoke-style playback with click-to-seek, inline transcript editing, speaker renaming |
-| **Hardware** | Apple Silicon (Metal/MPS), NVIDIA CUDA, or plain CPU — auto-detected |
-| **Long files** | Hours-long audio handled via silence-aware chunking, with progress bar + ETA; jobs cancellable |
-| **Licensing** | Default model stack is commercially usable (see [Model licensing](#model-licensing--commercial-use)) |
+| **Languages** | Cantonese, Mandarin, English (+ 96 more via Whisper), auto-detected or chosen |
+| **Speakers** | Finds who spoke when (pyannote community-1, or a built-in no-account option). Wrong count? Re-detect in seconds |
+| **Input** | mp3, m4a, wav, flac, ogg, mp4, mov … anything ffmpeg reads; several files at once |
+| **Output** | Word (.docx, Times New Roman + PMingLiU), SRT/VTT subtitles, text, JSON with word timings |
+| **Editing** | Karaoke playback, click-to-play, inline editing, rename/merge/recolour speakers |
+| **Hardware** | Apple Silicon (MPS), NVIDIA CUDA, or plain CPU — picked automatically |
+| **Long files** | Hours-long audio, progress bar with time left, cancel any time |
+| **Licensing** | Default models may be used commercially ([details](#model-licensing--commercial-use)) |
+
+**Documentation**
+
+- 📘 [User guide](docs/USER_GUIDE.md) — every feature, step by step
+- 🧠 [Models](docs/MODELS.md) — which model to pick, licenses, newer options
+- 🔌 [API reference](docs/API.md) — for developers and other apps
 
 ---
 
 ## Quick start
 
-### macOS (Mac Studio / MacBook)
+### What you need
 
-**Double-click `start.command`.** That's it. It installs everything it needs on
-first run (uv, ffmpeg, Python packages), starts the server, and opens the UI at
-<http://localhost:8756>.
+- A Mac with Apple Silicon (M1 or newer), or a Linux PC, ideally with an NVIDIA
+  GPU. 16 GB RAM or more is recommended for the default model.
+- About **5 GB of free disk** for the default models.
+- Internet for the **first** start only (to download the models).
 
-From a terminal instead:
+### macOS — easiest
+
+1. Get the project. Either click the green **Code** button on GitHub →
+   *Download ZIP* and unzip it, or in Terminal:
+   ```bash
+   git clone https://github.com/noonkho/SST_transcript.git
+   ```
+2. **Double-click `start.command`** in the project folder.
+   (The first time, macOS may block it: right-click → *Open* → *Open*.)
+3. Wait. The first start installs what it needs (uv, ffmpeg, Python packages)
+   and opens <http://localhost:8756> in your browser.
+
+### macOS / Linux — from a terminal
 
 ```bash
-./start.sh          # or: uv sync && uv run sst-server
+cd SST_transcript
+./start.sh
 ```
 
-### Linux / NVIDIA (e.g. DGX Spark) — Docker
+Or by hand, if you already have [uv](https://docs.astral.sh/uv/) and ffmpeg:
+
+```bash
+uv sync
+uv run sst-server
+```
+
+Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd>.
+
+### Linux with NVIDIA (e.g. DGX Spark) — Docker
 
 ```bash
 docker compose up -d --build
-# UI at http://<machine>:8756 — models persist in a named volume
 ```
 
-CPU-only host? Delete the `deploy:` block in `docker-compose.yml`.
+The app is then at `http://<machine>:8756`. Models are kept in a Docker volume.
+No GPU? Delete the `deploy:` block in `docker-compose.yml` first.
 
-### First run
+### First start
 
-1. The default STT model (**Whisper large-v3**, ~3 GB) downloads automatically in
-   the background — watch progress in the **Models** tab.
-2. The built-in diarizer works immediately, no account needed.
-3. *Recommended:* enable **pyannote community-1** diarization (better accuracy):
-   - Create a free token at <https://huggingface.co/settings/tokens>
-   - Accept the terms of [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
-   - Paste the token in **Settings**, then download it in **Models**.
-   - After the download, everything runs offline; the token is stored locally.
+1. The speech model (**Whisper large-v3**, ~3 GB) downloads by itself — watch it
+   in the **Models** tab. Transcription works once it is loaded (the Dashboard
+   then shows it under "STT model loaded").
+2. Speaker detection works straight away with the built-in model.
+3. *Recommended:* switch on the better **pyannote community-1** speaker model:
+   - Make a free token at <https://huggingface.co/settings/tokens>
+   - Accept the terms on [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+   - Paste the token in **Settings → Hugging Face token**, then download the
+     model in **Models**. After that, everything runs offline.
+
+### Your first transcript
+
+1. Open the **Transcribe** tab.
+2. Drag an audio or video file onto the box (or click it to choose).
+3. Pick the language and number of speakers, or leave both on *Auto-detect*.
+4. Click **Start transcribing** and watch the progress bar.
+5. When it is done: click a line to play it, double-click to fix it, click a
+   speaker chip to rename the speaker, and click **DOCX** to export to Word.
+
+Speaker count wrong? Click **👥 Re-detect speakers** — no need to transcribe
+again. Everything else is in the [user guide](docs/USER_GUIDE.md).
+
+### Update to the latest version
+
+```bash
+cd SST_transcript
+git pull
+```
+
+Then stop the server (<kbd>Ctrl</kbd>+<kbd>C</kbd>) and start it again with
+`./start.sh` or `start.command` (both also install new Python packages). If you
+start with `uv run sst-server`, run `uv sync` first. Your settings, jobs and
+models are kept.
 
 ---
 
-## Choosing models
+## Use it from other computers (network & login)
 
-Open the **Models** tab to download and switch models. Guidance:
+- **Same machine:** `http://localhost:<port>`.
+- **Other devices on WiFi/Ethernet:** on the same router/subnet, open
+  `http://<LAN-IP>:<port>` (find the IP on the Dashboard's "Share access" card).
+  mDNS `http://<hostname>.local:<port>` works on Apple devices and most other OSes.
+- **Tailscale / VPN:** the Dashboard also lists the `100.x.y.z` address, which
+  works from anywhere on your tailnet.
+- **macOS firewall:** System Settings → Network → Firewall. Either keep it on and, on
+  first launch, click **Allow incoming connections** for the Python/uv process, or add
+  it under *Options…*. Linux ufw: `sudo ufw allow <port>/tcp`.
+- **Enable login:** Settings → Access & security → set an API key → turn on
+  "Require login for other devices". This machine (localhost) is never asked.
+- **API with the key:**
+  ```bash
+  curl -H "Authorization: Bearer YOUR_KEY" http://<LAN-IP>:<port>/v1/models
+  ```
+  OpenAI SDK: `OpenAI(base_url="http://<LAN-IP>:<port>/v1", api_key="YOUR_KEY")`.
+  Browsers log in once at `/login`; the session lasts 24 h.
+- **Change port:** Settings → Server port → Save & restart. Models stay loaded.
+- Traffic is plain HTTP — fine inside a trusted network or tailnet. For the open
+  internet, put Caddy/nginx in front for HTTPS.
 
-| Model | Best for | Size | Notes |
-|---|---|---|---|
-| **Whisper large-v3** (default) | Highest accuracy, word timestamps | 3 GB | Great Mandarin/English; decent Cantonese |
-| **Whisper large-v3-turbo** | Long recordings, 4× faster | 1.6 GB | Near-equal accuracy |
-| **SenseVoice Small** | Cantonese + heavy **code-switching** | 1 GB | Very fast; segment-level timestamps only. Needs `uv sync --extra sensevoice` |
-| **pyannote community-1** (diarization, default) | Best open-source accuracy, overlapping speech | 30 MB | Gated — free HF token |
-| **pyannote 3.1** (diarization) | Same job, previous generation | 30 MB | Gated — free HF token; pure MIT license |
-| **Built-in** (diarization) | Zero-setup diarization | 90 MB | VAD + ECAPA embeddings + clustering (see below) |
+---
 
-Only one STT model is held in memory at a time (models load once at startup and
-stay resident for low latency). Switching models while a transcription is running
-is safe — the switch waits until the current job finishes.
+## How it works
 
-### Adding models from Hugging Face / removing models
+```
+audio file ─ ffmpeg → 16 kHz mono
+             ├─ Silero VAD → silence-aware ≤28 s chunks (long-file support, progress %)
+             ├─ Diarization (pyannote or built-in) → speaker turns
+             └─ STT per chunk (Whisper on CUDA/MPS/CPU) → words with timestamps
+                        └─ words × turns overlap → segments split at speaker changes
+                                     → JSON / VTT / SRT / DOCX with {start, end, speaker, text}
+```
 
-The catalog above is the curated default list; you can extend it. In
-**Models → Search Hugging Face**, type e.g. `whisper cantonese` — real results
-include community fine-tunes such as `alvanlii/whisper-small-cantonese`
-(350k+ downloads). Results show download counts and a compatibility badge.
-Click **Download** and the model appears in the *Speech-to-text models* list
-(marked "Added from Hugging Face search") and in the model selector, like any
-built-in entry. Check the model's page for its license before commercial use.
+- **One code base for every machine:** PyTorch, with the device picked at
+  start (`cuda` → `mps` → `cpu`). Works on a Mac today and a DGX box tomorrow.
+- Jobs run one at a time on a worker thread; the web app stays responsive.
+  Progress and time-left come from measured speed.
+- **Re-detect speakers** re-runs only the diarization step and re-assigns the
+  stored words, so fixing the speaker count is much faster than a new transcript.
 
-While a model downloads, both its search row and its entry in the models list
-show **live progress** — percentage, downloaded/total size, and estimated time
-remaining (e.g. `12% · 380 MB / 3.0 GB · ~25m left`) — plus a **✕ Cancel**
-button. Cancelling stops the transfer and **removes the partially downloaded
-files** from disk; the Download button reappears if you change your mind. If
-the server restarts mid-download, click **Download** again — it resumes from
-where it stopped.
+## Configuration
 
-Every downloaded model — curated or custom — has a **Remove** button that deletes
-its files from local storage (you can re-download any time). The model currently
-selected/loaded can't be removed; switch to another model first.
+Everything can be changed in the web app. Settings are saved in `data/config.json`:
 
-**Will a searched model run on my machine?** Yes, if it carries the
-`compatible` badge. Everything in this service runs through **PyTorch**, which
-covers all supported hardware with the same code and settings — Apple Silicon
-(MPS), NVIDIA (CUDA), and plain CPU. A compatible model is compatible
-*everywhere*; there is no macOS-only or Linux-only model, and no per-OS
-configuration. What the badge filters out is repos published in a **different
-runtime's format** — `mlx-community/…` (MLX), `…-ct2` / faster-whisper
-(CTranslate2), GGUF/GGML (whisper.cpp), ONNX — which this service intentionally
-does not load. Those are alternative *packagings* of the same models, not
-better ones for your Mac: if you see `mlx-community/whisper-large-v3`, just use
-the standard `openai/whisper-large-v3` — same weights, runs on your GPU via
-PyTorch/MPS.
+| Key | Default | Meaning |
+|---|---|---|
+| `stt_model` | `openai/whisper-large-v3` | Speech-to-text model |
+| `diarization_model` | `pyannote/speaker-diarization-community-1` | Speaker model (falls back to the built-in one until a Hugging Face token is saved) |
+| `device_override` | auto | Force `cuda` / `mps` / `cpu` |
+| `port` | `8756` | Server port |
+| `max_jobs` | `5` | Finished jobs kept on disk (3–20); the oldest are deleted |
+| `auth_enabled` | `false` | Require the API key / a login for other computers |
+| `api_key` | `""` | The key for the Bearer header and the login page |
+| `access_log` | `quiet` | Request lines in the log: `quiet` (hide routine page refreshes), `full`, `off` |
 
-### Offline / air-gapped use
+Environment variables: `SST_DATA_DIR` (where settings, jobs and logs live),
+`HF_HOME` (model cache).
 
-Only the **first download** of each model needs the Internet; after that,
-everything runs fully offline (models are cached in `~/.cache/huggingface`).
-Models aren't bundled in this repository because they're multi-GB and some
-(pyannote) are distributed through gated Hugging Face repos.
+### Logs
 
-To prepare a machine with **no Internet at all**:
+The server writes to the terminal **and** to `data/logs/sst.log` (rotated at
+5 MB, 3 old files kept, so at most ~20 MB). In the default *quiet* mode it no
+longer prints a `GET /api/jobs 200 OK` line every few seconds for every open
+browser — only uploads, changes, job start/finish, and errors. View, download
+and clear the log on the **Dashboard**, and switch to *full* there when you need
+every request.
 
-1. On a connected machine, download the models you need via the Models tab.
-2. Copy `~/.cache/huggingface/hub` to the same path on the offline machine
-   (or anywhere, and point `HF_HOME` at it).
-3. Copy `data/downloaded_models.json` from this project folder too — it's the
-   record of which models are complete.
-4. Optionally set `HF_HUB_OFFLINE=1` on the offline machine so nothing ever
-   attempts a network call.
+## Troubleshooting
 
-### Model licensing / commercial use
+| Problem | Fix |
+|---|---|
+| "ffmpeg is required" | `brew install ffmpeg` (macOS) or `sudo apt-get install ffmpeg` (Linux) |
+| "Model … is not downloaded yet" | Open **Models** and download it. The default model downloads by itself on the first start — wait for it |
+| Speaker model (pyannote) won't load | Save a Hugging Face token in **Settings** *and* accept the model terms on huggingface.co. Until then the built-in speaker model is used automatically |
+| Wrong number of speakers | **👥 Re-detect speakers** on the transcript, or merge two speakers by renaming one to the other's name |
+| Cantonese comes out as standard written Chinese | Set Language to Cantonese. See [MODELS.md](docs/MODELS.md) for Cantonese-focused models |
+| Very slow / out of memory | Use `whisper-large-v3-turbo` (Models tab) and close other big apps — a 16 GB Mac swaps hard with large-v3 plus a browser and an IDE |
+| Cancel says "Cancelling…" for a while | It stops at the next safe point (1–3 s normally). Only model loading can't be interrupted |
+| Other computers can't connect | Check the address on **Dashboard → Share access**, the firewall, and that both are on the same network or tailnet |
+| Upgraded from an old version and pyannote 3.1 is still selected | Switch to community-1 in **Models** |
+| Something else | **Dashboard → Server log** shows what happened. If the server seems frozen, run `kill -USR1 <server pid>` — every thread's stack is printed to the terminal; include it when reporting the problem |
+
+---
+
+## Model licensing / commercial use
 
 Every model card in the Models tab shows its license. Verified summary (July 2026):
 
@@ -135,11 +208,9 @@ Every model card in the Models tab shows its license. Verified summary (July 202
 | pyannote **3.1** | MIT | ✅ Yes, no conditions |
 | Built-in diarizer (Silero VAD / SpeechBrain ECAPA / scikit-learn) | MIT / Apache-2.0 / BSD | ✅ Yes |
 | SenseVoice Small | FunASR Model License | ⚠️ **Ambiguous** — confirm with FunAudioLLM before shipping commercially |
-| NVIDIA Sortformer (not included) | CC-BY-**NC**-4.0 | ❌ No — this is why it's not in the catalog |
+| NVIDIA Sortformer v1 (not included) | CC-BY-**NC**-4.0 | ❌ No — this is why it's not in the catalog |
 
-Note: pyannote's *open* models are free for commercial use — the gating on
-Hugging Face only collects contact info. (The paid "pyannoteAI Precision" API
-is a separate commercial product.)
+More, including newer models checked in October 2026: [docs/MODELS.md](docs/MODELS.md).
 
 ### Attribution
 
@@ -161,433 +232,3 @@ Other components (no attribution required, listed for completeness):
 [Silero VAD](https://github.com/snakers4/silero-vad) (MIT) ·
 [SpeechBrain ECAPA-TDNN](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb) (Apache-2.0) ·
 scikit-learn (BSD).
-
-### What is the built-in diarizer?
-
-The built-in option is a classic three-stage diarization pipeline assembled from
-permissively-licensed components — no single "diarization model", but a chain:
-
-1. **VAD (Voice Activity Detection)** — [Silero VAD](https://github.com/snakers4/silero-vad)
-   (MIT), a tiny neural net that scans the audio and answers one question:
-   *when is anyone speaking at all?* Output: speech regions like `2.1s–7.8s`,
-   with silences and noise removed.
-2. **ECAPA speaker embeddings** — each speech region is cut into 1.5 s windows, and
-   [SpeechBrain's ECAPA-TDNN](https://huggingface.co/speechbrain/spkrec-ecapa-voxceleb)
-   (Apache-2.0) converts each window into a 192-number "voiceprint" vector.
-   ECAPA-TDNN is a neural architecture trained on VoxCeleb (~7,000 speakers) so that
-   *the same voice always lands near itself* in that vector space, regardless of
-   what is being said or in which language.
-3. **Clustering** — scikit-learn (BSD) groups those voiceprints by cosine
-   similarity (agglomerative clustering). Each group = one speaker; the groups
-   are mapped back to time ranges to produce "SPEAKER_00 spoke 0:00–0:07".
-
-Because it treats each window independently, it's weaker than pyannote when
-people talk over each other (pyannote's neural pipeline detects overlapping
-speech explicitly). For meetings where people mostly take turns, it performs well.
-
----
-
-## Using the web UI
-
-The interface is **responsive** and adapts to the screen: on wide monitors and
-TVs the Transcribe tab uses a two-column layout (transcription on the left,
-**Recent jobs** always visible on the right) and the container widens to fill
-the space; on tablets and phones the sidebar becomes a top bar and everything
-stacks into a single, touch-friendly column.
-
-### Karaoke playback
-
-After a transcription finishes (or when you open a job from **Recent jobs**), the
-result card shows an **audio player** above the transcript:
-
-- The line currently being spoken is **highlighted** and auto-scrolled into view.
-- **Click any line** to jump the audio there and keep playing.
-- Original audio is kept on disk, so playback still works after a server restart.
-
-### Editing the transcript
-
-**Double-click a line** to edit it. While editing, the audio **loops over that
-line** so you can listen while you fix the text. Controls:
-
-| Action | How |
-|---|---|
-| Save the line | <kbd>Enter</kbd> or **✓ Done** |
-| Split into two lines at the cursor | <kbd>Shift+Enter</kbd> or **✂ Split** (timestamps split proportionally) |
-| Merge into the previous line | <kbd>Backspace</kbd> at the very start of the line, or **⇧ Merge up** |
-| Delete the line | **✕ Delete** |
-| Insert a new empty line | **＋ Line below**, the **＋** button on line hover, or **＋ Add line at end** |
-| Change the line's speaker | Dropdown in the edit toolbar (includes "＋ New speaker…") |
-| Discard changes | <kbd>Esc</kbd> or **Cancel** |
-
-**Rename / recolour speakers**: click a speaker chip in the bar above the
-transcript — a small panel opens where you can type a new name (e.g.
-`SPEAKER_00` → `Alice`) and pick one of 10 colours. Both apply to every line of
-that speaker and are saved with the transcript. (By default each speaker name
-gets a stable colour derived from the name itself, so colours no longer shuffle
-around after edits.)
-
-All edits are **saved on the server immediately** — exports (JSON/VTT/SRT/TXT/DOCX)
-always reflect your edits, and edits survive restarts.
-
-### Exports
-
-Buttons at the top of the result card: **JSON**, **VTT**, **SRT**, **TXT**, and
-**DOCX** — a Word document with a 6-column table (ID · Start · End · Person · ':' · Transcript).
-
-### Job history & retention
-
-Finished jobs (transcript + audio for playback) are kept on disk. The server keeps
-the **last 5 jobs** by default (configurable **3–20** in *Settings → Job history*);
-older ones are auto-deleted. Each job row has a **🗑 delete** button, and
-running/queued jobs have a **■ Cancel** button (also available on the progress
-card during transcription).
-
-To save disk space, uncompressed uploads (wav/flac/aiff…) are re-encoded to
-mono AAC (~40 MB per hour instead of ~1 GB) after transcription — playback
-quality is unaffected. Already-compressed uploads (mp3/m4a/…) are stored as-is.
-Failed or cancelled jobs don't keep their audio.
-
-## API
-
-Interactive docs at <http://localhost:8756/docs>.
-
-### `POST /v1/audio/transcriptions` (OpenAI-compatible)
-
-Multipart form fields:
-
-| Field | Default | Description |
-|---|---|---|
-| `file` | *required* | The audio file |
-| `model` | server default | Any id from [`GET /v1/models`](#get-v1models--discovery--validation); unknown ids → 400 `model_not_found` |
-| `language` | auto | `yue` (Cantonese), `zh` (Mandarin), `en` (English), … |
-| `response_format` | `json` | `json`, `verbose_json`, `text`, `srt`, `vtt` (DOCX is UI-only, via `/api/jobs/{id}/download`) |
-| `diarize` | `true` | *(SST extension)* speaker diarization on/off |
-| `num_speakers` | auto | *(SST extension)* number of speakers, if known |
-| `diarization_model` | server default | *(SST extension)* diarization model id |
-
-```bash
-curl -s http://localhost:8756/v1/audio/transcriptions \
-  -F file=@meeting.m4a \
-  -F response_format=verbose_json | jq .
-```
-
-Response (`verbose_json`):
-
-```json
-{
-  "task": "transcribe",
-  "language": "yue",
-  "duration": 1834.2,
-  "text": "…full transcript…",
-  "segments": [
-    {"id": 0, "start": 0.0, "end": 6.6, "speaker": "SPEAKER_00", "text": "大家好，歡迎…"},
-    {"id": 1, "start": 6.6, "end": 13.2, "speaker": "SPEAKER_01", "text": "Thank you, 我哋開始啦"}
-  ],
-  "speakers": ["SPEAKER_00", "SPEAKER_01"],
-  "model": "openai/whisper-large-v3",
-  "diarization_model": "pyannote/speaker-diarization-community-1",
-  "warnings": []
-}
-```
-
-### Word-level timestamps & stable speaker labels
-
-`verbose_json` segments carry a `words` array:
-
-```json
-{"id": 0, "start": 0.0, "end": 2.5, "speaker": "SPEAKER_00", "text": "Good morning everyone.",
- "words": [{"word": "Good", "start": 0.0, "end": 0.3}, {"word": "morning", "start": 0.3, "end": 0.8}]}
-```
-
-- Whisper produces real word timings (they already drive speaker splitting).
-- Engines without word timestamps (SenseVoice) degrade to **one entry spanning the
-  segment** — the array is never missing.
-- **Speaker labels are deterministic**: `SPEAKER_00` is always the first speaker
-  heard, so re-running the same file yields identical labels. Labels are *per file* —
-  `SPEAKER_00` in file A and file B are not guaranteed to be the same person.
-
-### Progress for long files
-
-Audio is always split on silence into ≤28 s chunks (Whisper's window), so multi-hour
-files stream through without timing out — no size threshold to configure.
-
-**Poll:** every response carries an `X-Job-ID` header.
-
-```bash
-curl -s http://localhost:8756/v1/audio/transcriptions/<job-id>/progress
-# {"status":"processing","chunks_complete":2,"chunks_total":4,"percent":50,"stage":"transcribing","eta_seconds":31.2}
-```
-
-**Stream (NDJSON):** add `?stream_progress=true` to get progress on the same request;
-the last line carries the finished transcript, identical to the non-streaming response.
-
-```bash
-curl -N -s "http://localhost:8756/v1/audio/transcriptions?stream_progress=true" \
-  -F file=@meeting.m4a -F response_format=verbose_json
-```
-```
-{"event":"accepted","job_id":"a1b2c3"}
-{"event":"chunks_planned","chunks_total":4,"duration_seconds":7200}
-{"event":"chunk_complete","chunk_index":0,"chunks_complete":1,"chunks_total":4,"percent":30}
-{"event":"complete","job_id":"a1b2c3","total_text_length":10840,"duration_seconds":7200,"response":{…}}
-```
-
-### Graceful degradation when diarization is unavailable
-
-`diarize` defaults to `true`, but a missing or unloadable diarization model never
-fails the request — **transcription is not lost**. The server returns **200** with the
-transcript, `speakers: null`, every `segments[].speaker` set to `null` (the key is
-always present), and a `warnings` entry:
-
-```json
-{
-  "text": "Good morning everyone…",
-  "language": "en",
-  "duration": 42.5,
-  "segments": [{"id": 0, "start": 0.0, "end": 2.5, "text": "Good morning…", "speaker": null}],
-  "speakers": null,
-  "diarization_model": null,
-  "warnings": [
-    {
-      "code": "diarization_unavailable",
-      "message": "Diarization model pyannote/speaker-diarization-community-1 not loaded; segments processed without speaker labels. Segments[].speaker is null."
-    }
-  ]
-}
-```
-
-- `warnings` is present on **every** response — an empty array when nothing degraded.
-- The same `diarization_unavailable` code covers both "the model wouldn't load" and
-  "the diarizer failed mid-run"; the message says which.
-- `speaker` is `null` whenever no diarization ran (including `diarize=false`) rather
-  than a fabricated `SPEAKER_00`. `speakers` is `null` too, and `diarization_model`
-  reports what actually ran.
-- Only the STT model failing to load is fatal (500) — without it there is no transcript.
-- An explicit `diarization_model=` that the server doesn't have is still a
-  **400 `model_not_found`**: you asked for something specific, so it's a client error
-  rather than a silent downgrade.
-
-### From an LLM application (Python)
-
-```python
-# Option A — OpenAI SDK, pointed at the local server
-from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8756/v1", api_key="not-needed")
-with open("meeting.m4a", "rb") as f:
-    result = client.audio.transcriptions.create(file=f, model="", response_format="verbose_json")
-
-# Option B — plain HTTP (any language)
-import requests
-with open("meeting.m4a", "rb") as f:
-    result = requests.post(
-        "http://localhost:8756/v1/audio/transcriptions",
-        files={"file": f}, data={"response_format": "verbose_json"},
-    ).json()
-```
-
-See **[client_example.py](client_example.py)** for a runnable demo, including async
-submission with a live progress bar:
-
-```bash
-uv run python client_example.py meeting.m4a
-```
-
-### `GET /health` — readiness probe
-
-Lightweight liveness/readiness check for orchestrators and clients that verify the
-backend at startup. **No auth** (works even with login enabled), no inference, no
-disk access — it reads in-memory state only and answers in ~2 ms.
-
-```bash
-curl -s http://localhost:8756/health
-```
-
-| Server state | HTTP | Body |
-|---|---|---|
-| Both models loaded | 200 | `{"status":"ready","version":"0.1.0","models_loaded":["openai/whisper-large-v3","pyannote/speaker-diarization-community-1"]}` |
-| STT up, diarizer not loaded | 200 | adds `"warnings":[{"code":"model_not_loaded","model":"pyannote/speaker-diarization-community-1"}]` — transcription still works, so this is **not** a failure |
-| STT not loaded (starting, downloading, or failed) | 503 | `{"status":"degraded","version":"0.1.0","error":"Required model openai/whisper-large-v3 not loaded or accessible"}` |
-
-`ready` means the configured STT model is resident and transcription can serve.
-Use it as a Kubernetes liveness/readiness probe, or poll it after boot — a cold
-start returns 503 until the model finishes loading.
-
-### `GET /v1/models` — discovery & validation
-
-Lists every model the server can serve *right now* (curated + any added from
-Hugging Face search), with what each can do. Validate a configured model id
-against this before uploading audio.
-
-```bash
-curl -s http://localhost:8756/v1/models
-```
-
-```json
-{
-  "object": "list",
-  "data": [
-    {
-      "id": "openai/whisper-large-v3",
-      "object": "model",
-      "owned_by": "openai",
-      "kind": "stt",
-      "capabilities": ["transcription"],
-      "languages": ["af", "am", "…", "yue", "zh"],
-      "input_modality": "audio",
-      "max_audio_length_seconds": 43200,
-      "loaded": true
-    },
-    {
-      "id": "pyannote/speaker-diarization-community-1",
-      "object": "model",
-      "owned_by": "pyannote",
-      "kind": "diarization",
-      "capabilities": ["diarization"],
-      "input_modality": "audio",
-      "loaded": true
-    }
-  ]
-}
-```
-
-- `capabilities` — what the model itself does. STT models report only
-  `transcription`; **no STT model can identify speakers.** Diarization comes from a
-  separate model (the entries with the `diarization` capability), which the server
-  pairs with the STT model when a request asks for it. So `diarize=true` works as
-  long as *some* diarization model is available — check for one in this list.
-- `languages` — read live from the model's own tokenizer (Whisper reports all 99
-  codes including `yue`); omitted for diarization models, which are language-independent.
-- `max_audio_length_seconds` — 43200 (12 h). **Advisory guidance for clients, not
-  enforced.** The pipeline chunks on silence and handles multi-hour files; this is
-  what a comfortable single request looks like.
-
-```python
-# validate before sending audio (see client_example.py)
-models = requests.get("http://localhost:8756/v1/models").json()["data"]
-ids = [m["id"] for m in models if "transcription" in m["capabilities"]]
-assert MY_MODEL in ids, f"{MY_MODEL} unavailable; server offers {ids}"
-```
-
-### `/v1` error format
-
-Every `/v1` error returns the OpenAI envelope, so OpenAI SDKs and other clients can
-parse failures uniformly:
-
-```json
-{"error": {"message": "Model not found: nonexistent-whisper",
-           "type": "invalid_request_error",
-           "code": "model_not_found"}}
-```
-
-| Status | `type` | Example `code` | When |
-|---|---|---|---|
-| 400 | `invalid_request_error` | `model_not_found` | `model`/`diarization_model` isn't downloaded |
-| 400 | `invalid_request_error` | `missing_required_field` | no `file` in the request |
-| 400 | `invalid_request_error` | `invalid_response_format` | `response_format` not one of `json, verbose_json, text, srt, vtt` |
-| 401 | `invalid_api_key` | `invalid_api_key` | login enabled and the Bearer key is wrong/missing |
-| 422 | `invalid_request_error` | `invalid_value` | a field is present but unusable |
-| 429 | `rate_limit_error` | `rate_limit_exceeded` | too many failed logins |
-| 500 | `server_error` | `internal_error` | transcription failed |
-
-The web UI's own `/api/*` endpoints are unchanged — they keep FastAPI's
-`{"detail": "..."}` shape. Only `/v1` speaks the OpenAI dialect.
-
-### Other endpoints
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /health` | Readiness probe — 200 `ready` / 503 `degraded`. No auth |
-| `GET /v1/models` | List servable models + capabilities (OpenAI-style) |
-| `POST /api/transcribe` | Async job submission (returns a job id immediately) |
-| `GET /api/jobs/{id}` | Job status, progress, ETA, and result |
-| `GET /api/jobs/{id}/events` | Server-sent events stream of progress |
-| `POST /api/jobs/{id}/cancel` | Cancel a queued or running job |
-| `DELETE /api/jobs/{id}` | Delete a finished job (transcript + audio) |
-| `GET /api/jobs/{id}/audio` | Stream the original audio (used by the player) |
-| `PUT /api/jobs/{id}/result` | Save transcript edits (`{"segments": [...]}`) |
-| `GET /api/jobs/{id}/download?format=srt` | Download result as `json`/`vtt`/`srt`/`text`/`docx` |
-| `GET /api/status` | Server, device, and loaded-model status |
-
-The server listens on `0.0.0.0:8756`, so other machines on your local network can
-use it at `http://<this-machine>.local:8756`.
-
----
-
-## Network access & security
-
-- **Same machine:** `http://localhost:<port>`.
-- **Other devices on WiFi/Ethernet:** on the same router/subnet, open
-  `http://<LAN-IP>:<port>` (find the IP on the Dashboard's "Share access" card).
-  mDNS `http://<hostname>.local:<port>` works on Apple devices and most other OSes.
-  Wired vs wireless doesn't matter — both use the LAN IP.
-- **macOS firewall:** System Settings → Network → Firewall. Either keep it on and, on
-  first launch, click **Allow incoming connections** for the Python/uv process, or add
-  it under *Options…*. (The firewall filters by app, not port — allowing the process is
-  enough.) Windows: allow the app on Private networks. Linux ufw: `sudo ufw allow <port>/tcp`.
-- **Enable login:** Settings → Access & security → set an API key → toggle "Require
-  login for other devices" on. This machine (localhost) is never challenged.
-- **API with the key:**
-  ```bash
-  curl -H "Authorization: Bearer YOUR_KEY" http://<LAN-IP>:<port>/v1/models
-  ```
-  OpenAI SDK: `OpenAI(base_url="http://<LAN-IP>:<port>/v1", api_key="YOUR_KEY")` — the
-  SDK already sends the Bearer header, so no code change is needed beyond the key.
-  Browsers log in once at `/login`; the session cookie lasts 24h, then it's login again.
-- **Change port:** Settings → Server port → Save & restart. The web server rebinds
-  in-process — models already in memory stay loaded, no re-download or reload.
-- Note: LAN traffic is plain HTTP (fine inside a trusted network). For untrusted
-  networks, put Caddy/nginx in front for HTTPS — out of scope here.
-
----
-
-## How it works
-
-```
-audio file ─ ffmpeg → 16 kHz mono
-             ├─ Silero VAD → silence-aware ≤28 s chunks (long-file support, progress %)
-             ├─ Diarization (pyannote or built-in) → speaker turns
-             └─ STT per chunk (Whisper on CUDA/MPS/CPU) → words with timestamps
-                        └─ words × turns overlap → segments split at speaker changes
-                                     → JSON / VTT / SRT with {start, end, speaker, text}
-```
-
-- **Cross-platform by design:** a single PyTorch codebase; the device is picked at
-  startup (`cuda` → `mps` → `cpu`). Works today on Apple Silicon, tomorrow on a
-  DGX box, unchanged.
-- Jobs run one at a time on a worker thread; the API stays responsive and
-  progress/ETA are computed from measured per-chunk throughput.
-
-## Configuration
-
-Everything is configurable in the UI (Settings tab). State lives in `data/config.json`:
-
-| Key | Default | Meaning |
-|---|---|---|
-| `stt_model` | `openai/whisper-large-v3` | Active STT model |
-| `diarization_model` | `pyannote/speaker-diarization-community-1` | Active diarizer (falls back to the built-in one until a HF token is saved) |
-| `device_override` | auto | Force `cuda` / `mps` / `cpu` |
-| `port` | `8756` | Server port |
-| `max_jobs` | `5` | Finished jobs kept on disk (3–20); oldest auto-deleted |
-| `auth_enabled` | `false` | Require an API key / browser login for non-localhost requests |
-| `api_key` | `""` | API key for the Bearer header / login page (never returned by the API — only a `has_api_key` flag) |
-
-Environment variables: `SST_DATA_DIR` (config/state location), `HF_HOME`
-(model cache location).
-
-## Troubleshooting
-
-- **"ffmpeg is required"** — `brew install ffmpeg` (macOS) / `apt-get install ffmpeg` (Linux).
-- **"Model … is not downloaded yet"** — open the Models tab and download it (the
-  default model auto-downloads on first start; wait for it to finish).
-- **pyannote fails to load** — you need to (1) save an HF token in Settings and
-  (2) accept the model terms on huggingface.co (both links in Settings). Or switch
-  to the built-in diarizer in Models. Until pyannote is available, the server
-  automatically falls back to the built-in diarizer (the result JSON's
-  `diarization_model` field always tells you which one actually ran).
-- **Upgrading from an older version** — if you previously saved settings, your
-  `data/config.json` may still point at `pyannote/speaker-diarization-3.1`;
-  switch to community-1 in the Models tab (or delete `data/config.json`).
-- **Cantonese comes out as written Chinese** — that's Whisper's normalization.
-  Try `language=yue` explicitly, or use SenseVoice for colloquial Cantonese.
-- **Out of memory** — use `whisper-large-v3-turbo` or `whisper-medium` instead of
-  large-v3, and keep only one STT model loaded (automatic).

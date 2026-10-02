@@ -39,7 +39,8 @@ class SenseVoiceEngine(SttEngine):
             disable_pbar=True,
         )
 
-    def transcribe_chunk(self, audio: np.ndarray, language: str | None) -> list[SttSegment]:
+    def transcribe_chunk(self, audio: np.ndarray, language: str | None,
+                         should_stop=None) -> list[SttSegment]:  # chunks take < 1 s; no early stop
         lang = _LANG_MAP.get(language or "", "auto")
         result = self.model.generate(
             input=audio.astype(np.float32),

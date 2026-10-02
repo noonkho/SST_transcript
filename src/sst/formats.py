@@ -50,8 +50,33 @@ def to_text(result: dict) -> str:
     )
 
 
+LATIN_FONT = "Times New Roman"
+CJK_FONT = "PMingLiU"  # 新細明體 — Traditional Chinese serif that pairs with Times
+
+
+def _apply_fonts(style) -> None:
+    """Pin a style to Times New Roman (Latin) + PMingLiU (Chinese).
+
+    Word picks the font per character: w:ascii/w:hAnsi for Latin text,
+    w:eastAsia for CJK. The default template points these at *theme* fonts
+    (Calibri / MS Mincho…) via the *Theme attributes, which override the
+    explicit names — so those are removed.
+    """
+    from docx.oxml.ns import qn
+
+    style.font.name = LATIN_FONT  # sets w:ascii + w:hAnsi
+    rfonts = style.element.get_or_add_rPr().get_or_add_rFonts()
+    rfonts.set(qn("w:eastAsia"), CJK_FONT)
+    rfonts.set(qn("w:cs"), LATIN_FONT)
+    for attr in ("w:asciiTheme", "w:hAnsiTheme", "w:eastAsiaTheme", "w:cstheme"):
+        rfonts.attrib.pop(qn(attr), None)
+
+
 def to_docx(result: dict) -> bytes:
-    """Word document with a 6-column table: ID, Start, End, Person, ':', Text."""
+    """Word document with a 6-column table: ID, Start, End, Person, ':', Text.
+
+    Fonts: Times New Roman for English, PMingLiU for Chinese characters.
+    """
     from docx import Document
     from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.shared import Cm, Pt
@@ -63,6 +88,8 @@ def to_docx(result: dict) -> bytes:
     }
 
     doc = Document()
+    for name in ("Normal", "Heading 1", "Table Grid"):
+        _apply_fonts(doc.styles[name])
     doc.add_heading("Transcript", level=1)
     meta = doc.add_paragraph()
     meta.add_run(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 import torch
 
@@ -39,6 +41,7 @@ class PyannoteDiarizer(Diarizer):
         speech: list[tuple[float, float]] | None = None,  # unused; pyannote has its own VAD
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        progress: Callable[[float], None] | None = None,
     ) -> list[SpeakerTurn]:
         waveform = torch.from_numpy(audio).unsqueeze(0)
         kwargs = {}
@@ -50,6 +53,8 @@ class PyannoteDiarizer(Diarizer):
                 kwargs["min_speakers"] = min_speakers
             if max_speakers:
                 kwargs["max_speakers"] = max_speakers
+        if progress:
+            kwargs["hook"] = _progress_hook(progress)
         output = self.pipeline({"waveform": waveform, "sample_rate": SAMPLE_RATE}, **kwargs)
 
         # pyannote.audio 3.x returns an Annotation directly; 4.x (community-1)
@@ -72,3 +77,22 @@ class PyannoteDiarizer(Diarizer):
             ))
         turns.sort(key=lambda t: t.start)
         return turns
+
+
+# Share of the pipeline's run time each step takes (embeddings dominate).
+_STEP_SPAN = {"segmentation": (0.0, 0.3), "embeddings": (0.3, 0.95)}
+
+
+def _progress_hook(progress: Callable[[float], None]):
+    """Adapt pyannote's hook(step, artifact, file=, total=, completed=) to a
+    0..1 progress callback. pyannote calls it once per batch, so raising from
+    `progress` (job cancelled) stops the pipeline within one batch."""
+    last = [0.0]
+
+    def hook(step_name, step_artifact, file=None, total=None, completed=None):
+        span = _STEP_SPAN.get(step_name)
+        if span and total:
+            lo, hi = span
+            last[0] = max(last[0], lo + (hi - lo) * (completed or 0) / total)
+        progress(last[0])  # also the cancellation check for un-weighted steps
+    return hook

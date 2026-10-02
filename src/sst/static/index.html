@@ -36,13 +36,17 @@
       <h1>Transcribe</h1>
       <div class="transcribe-grid">
       <div class="transcribe-main">
-      <div class="card">
-        <div class="dropzone" id="dropzone">
+      <div class="card" id="upload-card">
+        <div class="step-title"><span class="step-num">1</span> Choose audio or video files</div>
+        <div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Choose audio files">
           <div class="dz-icon">⬆️</div>
-          <div class="dz-title">Drop an audio file here</div>
-          <div class="dz-sub">or click to choose — mp3, m4a, wav, flac, mp4 &amp; more</div>
-          <input type="file" id="file-input" accept="audio/*,video/*" hidden>
+          <div class="dz-title">Drop audio or video files here</div>
+          <div class="dz-sub">or click to choose — mp3, m4a, wav, flac, mp4, mov &amp; more · several files at once is fine</div>
+          <input type="file" id="file-input" accept="audio/*,video/*,.m4a,.mp3,.wav,.flac,.ogg,.opus,.aac,.wma,.mp4,.mov,.mkv,.webm,.aiff,.aif,.caf,.amr,.3gp" multiple hidden>
         </div>
+        <div id="staged-list" class="staged-list"></div>
+
+        <div class="step-title"><span class="step-num">2</span> Settings</div>
         <div class="options-row">
           <label>Language
             <select id="opt-language">
@@ -52,22 +56,31 @@
               <option value="en">English</option>
             </select>
           </label>
-          <label>Speakers
+          <label>Number of speakers
             <select id="opt-speakers">
-              <option value="">Auto</option>
+              <option value="">Auto-detect</option>
               <option value="1">1</option><option value="2">2</option><option value="3">3</option>
               <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+              <option value="10">10</option>
             </select>
           </label>
-          <label class="toggle-label">Diarization
+          <label class="toggle-label">Identify speakers
             <input type="checkbox" id="opt-diarize" checked class="toggle">
           </label>
+        </div>
+        <div class="hint">Not sure how many people talk? Leave it on <b>Auto-detect</b>. If the count comes
+          out wrong, use <b>Re-detect speakers</b> on the transcript — no need to transcribe again.</div>
+
+        <div class="start-row">
+          <button class="btn primary large" id="start-btn" disabled>Start transcribing</button>
+          <span class="hint" id="start-hint" style="margin:0">Choose a file first.</span>
         </div>
       </div>
 
       <div class="card hidden" id="progress-card">
         <div class="progress-head">
-          <span id="progress-file"></span>
+          <span id="progress-file" class="progress-file"></span>
           <span class="progress-actions">
             <span id="progress-stage" class="stage-chip"></span>
             <button class="btn danger small" id="cancel-job">Cancel</button>
@@ -76,6 +89,7 @@
         <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
         <div class="progress-meta">
           <span id="progress-pct">0%</span>
+          <span id="progress-detail"></span>
           <span id="progress-eta"></span>
           <span id="progress-elapsed"></span>
         </div>
@@ -97,9 +111,29 @@
         </div>
         <div class="result-warnings" id="result-warnings" style="display:none"></div>
         <audio id="player" controls preload="metadata"></audio>
-        <div class="speaker-bar" id="speaker-bar"></div>
+        <div class="speaker-row">
+          <div class="speaker-bar" id="speaker-bar"></div>
+          <button class="btn small" id="rediarize-open" title="Run speaker detection again with a different number of speakers">👥 Re-detect speakers</button>
+        </div>
+        <div class="rediarize-panel hidden" id="rediarize-panel">
+          <label>How many speakers?
+            <select id="rediarize-count">
+              <option value="">Auto-detect</option>
+              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
+              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
+              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
+              <option value="10">10</option>
+            </select>
+          </label>
+          <button class="btn primary small" id="rediarize-go">Re-detect</button>
+          <button class="btn small" id="rediarize-cancel">Close</button>
+          <div class="hint" style="flex-basis:100%;margin:0">Only the speaker labels change — the text and your
+            text edits stay. It runs as a new job (much faster than transcribing again) and the
+            original transcript is kept. Too <i>many</i> speakers? You can also merge two by renaming
+            one to the other's name.</div>
+        </div>
         <div class="edit-hint">▶ Click a line to play from there · ✏️ double-click a line to edit ·
-          🎨 click a speaker chip to rename it or change its colour ·
+          🎨 click a speaker chip to rename it, recolour it, or merge it into another speaker ·
           in edit mode: <kbd>Enter</kbd> save · <kbd>Shift+Enter</kbd> split at cursor ·
           <kbd>⌫</kbd> at line start merges up · <kbd>Esc</kbd> cancel</div>
         <div class="segments" id="segments"></div>
@@ -146,6 +180,25 @@
           <code id="share-curl-code"></code>
           <button class="icon-btn" data-copy-target="share-curl-code" title="Copy">⧉</button>
         </div>
+      </div>
+      <div class="card">
+        <div class="card-head">
+          <h2>Server log</h2>
+          <div class="btn-group">
+            <label class="inline-label">Request lines
+              <select id="log-mode">
+                <option value="quiet">Quiet — hide routine page refreshes</option>
+                <option value="full">Full — every request</option>
+                <option value="off">Off — no request lines</option>
+              </select>
+            </label>
+            <button class="btn small" id="log-refresh">Refresh</button>
+            <button class="btn small" id="log-download">Download</button>
+            <button class="btn small danger" id="log-clear">Clear</button>
+          </div>
+        </div>
+        <pre class="log-view" id="log-view">Loading…</pre>
+        <div class="hint" id="log-file-hint"></div>
       </div>
       <div class="card">
         <h2>API endpoints</h2>
@@ -197,9 +250,10 @@
       <div class="card">
         <h2>Hugging Face token</h2>
         <p class="hint">Needed once for gated models (pyannote diarization). Create a free token at
-          <a href="https://huggingface.co/settings/tokens" target="_blank">huggingface.co/settings/tokens</a>, and accept the terms of
-          <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank">pyannote/speaker-diarization-3.1</a> and
-          <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank">pyannote/segmentation-3.0</a>.
+          <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener">huggingface.co/settings/tokens</a>, and accept the terms of
+          <a href="https://huggingface.co/pyannote/speaker-diarization-community-1" target="_blank" rel="noopener">pyannote/speaker-diarization-community-1</a>
+          (and, only if you use the older 3.1 model, <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank" rel="noopener">speaker-diarization-3.1</a> +
+          <a href="https://huggingface.co/pyannote/segmentation-3.0" target="_blank" rel="noopener">segmentation-3.0</a>).
           The token is stored locally and only used to download models.</p>
         <div class="search-row">
           <input type="password" id="hf-token" placeholder="hf_…">
@@ -267,6 +321,7 @@
     </section>
   </main>
 </div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

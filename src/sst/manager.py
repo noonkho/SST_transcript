@@ -18,7 +18,7 @@ from huggingface_hub import HfApi
 
 from .config import DATA_DIR, config
 from .device import pick_device
-from .registry import BUILTIN_DIARIZATION_DEPS, CatalogEntry, classify_hf_model, find_entry
+from .registry import BUILTIN_DIARIZATION_DEPS, classify_hf_model, find_entry
 
 log = logging.getLogger("sst.manager")
 
@@ -292,12 +292,13 @@ class ModelManager:
         stt_repo: str | None = None,
         diar_repo: str | None = None,
         load_diar: bool = True,
+        load_stt: bool = True,
     ) -> None:
         """Load (or switch) the STT and diarization engines. Blocking; serialized."""
         stt_repo = stt_repo or config.stt_model
         diar_repo = diar_repo or config.diarization_model
         with self.engines_lock:
-            if self.stt_repo != stt_repo or self.stt_engine is None:
+            if load_stt and (self.stt_repo != stt_repo or self.stt_engine is None):
                 self._unload_stt()
                 self.stt_engine = self._build_stt(stt_repo)
                 self.stt_repo = stt_repo

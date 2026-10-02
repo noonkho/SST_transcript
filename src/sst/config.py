@@ -29,6 +29,7 @@ class AppConfig:
     max_jobs: int = 5  # finished jobs (and their audio) kept on disk; 3..20
     auth_enabled: bool = False
     api_key: str = ""            # >= 4 printable chars, no whitespace
+    access_log: str = "quiet"    # quiet | full | off — see sst/logs.py
     extra: dict = field(default_factory=dict)
 
     def clamped_max_jobs(self) -> int:

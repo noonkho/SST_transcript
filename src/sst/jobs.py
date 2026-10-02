@@ -62,11 +62,15 @@ class Job:
         return self.status in ("done", "error", "cancelled")
 
     def public(self, include_result: bool = False) -> dict:
+        result = self.result or {}
         d = {
             "id": self.id,
             "filename": self.filename,
             "status": self.status,
-            "stage": self.stage,
+            # a running job only stops at its next checkpoint (≤ ~1 s for
+            # diarization, one ≤28 s chunk for STT) — say so meanwhile
+            "stage": "cancelling" if self.cancel_requested and self.status == "running" else self.stage,
+            "cancel_requested": self.cancel_requested,
             "progress": round(self.progress, 4),
             "eta_seconds": round(self.eta_seconds, 1) if self.eta_seconds is not None else None,
             "elapsed_seconds": round(self.elapsed_seconds, 1),
@@ -77,6 +81,10 @@ class Job:
             "params": self.params,
             "has_audio": bool(self.audio_path and Path(self.audio_path).exists()),
             "created_at": self.created_at,
+            "finished_at": self.finished_at,
+            # small summary so the job list needn't fetch every transcript
+            "speaker_count": len(result.get("speakers") or []) if self.result else None,
+            "language": result.get("language") or None,
         }
         if include_result:
             d["result"] = self.result
@@ -157,7 +165,12 @@ class JobStore:
             job.status = "cancelled"
             job.stage = "cancelled"
             job.finished_at = time.time()
+            # the worker skips it without running, so drop its audio here
+            if job.audio_path:
+                Path(job.audio_path).unlink(missing_ok=True)
+                job.audio_path = ""
             self.save(job)
+            self.enforce_limit()
         return job
 
     def delete(self, job_id: str) -> bool:
@@ -207,6 +220,8 @@ class JobStore:
                 continue
             job.status = "running"
             job.started_at = time.time()
+            log.info("job %s started: %s %s", job.id, job.filename,
+                     {k: v for k, v in job.params.items() if v not in (None, "")})
             ticker = threading.Event()
 
             def tick(j: Job = job, stop: threading.Event = ticker) -> None:
@@ -226,6 +241,7 @@ class JobStore:
                 job.status = "cancelled"
                 job.stage = "cancelled"
             except Exception as exc:  # noqa: BLE001
+                log.exception("job %s failed", job.id)
                 job.status = "error"
                 job.stage = "error"
                 job.error = str(exc)[:500]
@@ -233,6 +249,7 @@ class JobStore:
                 ticker.set()
                 job.finished_at = time.time()
                 job.elapsed_seconds = job.finished_at - (job.started_at or job.finished_at)
+                log.info("job %s %s after %.1fs", job.id, job.status, job.elapsed_seconds)
                 if job.status == "done":
                     self._compress_audio(job)
                 else:

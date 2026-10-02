@@ -6,7 +6,7 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 
 /* Current transcript being shown/edited */
 const current = { jobId: null, filename: "", result: null, editingIdx: null, loop: null };
-let watchingJobId = null;
+let lastJobs = [];
 
 /* ---------------- tabs ---------------- */
 $$(".nav-item").forEach((btn) => {
@@ -16,7 +16,7 @@ $$(".nav-item").forEach((btn) => {
     btn.classList.add("active");
     $("#tab-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "models") refreshModels();
-    if (btn.dataset.tab === "dashboard") { refreshStatus(); refreshNetwork(); }
+    if (btn.dataset.tab === "dashboard") { refreshStatus(); refreshNetwork(); refreshLogs(); }
   });
 });
 
@@ -56,94 +56,313 @@ async function refreshStatus() {
   }
 }
 
-/* ---------------- upload ---------------- */
+/* ---------------- small helpers ---------------- */
+function toast(msg, kind = "") {
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
+  el.textContent = msg;
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.classList.add("out"), 4200);
+  setTimeout(() => el.remove(), 4700);
+}
+
+async function errorText(resp) {
+  const err = await resp.json().catch(() => ({}));
+  return err.detail || resp.statusText || "request failed";
+}
+
+const store = {
+  get(k) { try { return localStorage.getItem("sst." + k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem("sst." + k, v); } catch { /* private mode */ } },
+};
+
+function fmtBytes(n) {
+  if (!n) return "0 MB";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  while (n >= 1024 && i < 3) { n /= 1024; i++; }
+  return n.toFixed(1) + " " + units[i];
+}
+
+/* ---------------- step 1: choose files (nothing uploads yet) ---------------- */
 const dropzone = $("#dropzone");
 const fileInput = $("#file-input");
+const staged = [];   // [{file, duration}]
+
 dropzone.addEventListener("click", () => fileInput.click());
+dropzone.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+});
 fileInput.addEventListener("change", () => {
-  if (fileInput.files.length) submitFile(fileInput.files[0]);
+  addFiles(fileInput.files);
   fileInput.value = "";
 });
 ["dragover", "dragenter"].forEach((ev) =>
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.add("dragover"); }));
 ["dragleave", "drop"].forEach((ev) =>
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
-dropzone.addEventListener("drop", (e) => {
-  if (e.dataTransfer.files.length) submitFile(e.dataTransfer.files[0]);
-});
+dropzone.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
 
-async function submitFile(file) {
+const MEDIA_EXT = /\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|mov|webm|mkv|aiff?|caf|amr|3gp)$/i;
+
+function addFiles(list) {
+  for (const file of list) {
+    if (!MEDIA_EXT.test(file.name)) {
+      toast(`"${file.name}" is not an audio/video file this app can read.`, "err");
+      continue;
+    }
+    if (staged.some((s) => s.file.name === file.name && s.file.size === file.size)) continue;
+    const item = { file, duration: null };
+    staged.push(item);
+    probeDuration(item);
+  }
+  renderStaged();
+}
+
+/* Best-effort length read by the browser (works for most mp3/m4a/mp4/wav). */
+function probeDuration(item) {
+  const url = URL.createObjectURL(item.file);
+  const media = document.createElement(item.file.type.startsWith("video") ? "video" : "audio");
+  media.preload = "metadata";
+  media.onloadedmetadata = () => {
+    if (isFinite(media.duration)) { item.duration = media.duration; renderStaged(); }
+    URL.revokeObjectURL(url);
+  };
+  media.onerror = () => URL.revokeObjectURL(url);
+  media.src = url;
+}
+
+function renderStaged() {
+  const box = $("#staged-list");
+  box.innerHTML = "";
+  staged.forEach((item, i) => {
+    const row = document.createElement("div");
+    row.className = "staged-row";
+    row.innerHTML = `<span class="staged-icon">🎧</span>
+      <span class="staged-info"><span class="staged-name"></span>
+        <span class="staged-sub">${fmtBytes(item.file.size)}${item.duration ? " · " + fmtDur(item.duration) : ""}</span></span>
+      <button class="icon-btn" title="Remove this file" aria-label="Remove">✕</button>`;
+    row.querySelector(".staged-name").textContent = item.file.name;
+    row.querySelector("button").addEventListener("click", () => { staged.splice(i, 1); renderStaged(); });
+    box.appendChild(row);
+  });
+  dropzone.classList.toggle("compact", staged.length > 0);
+  $("#dropzone .dz-title").textContent = staged.length ? "Add more files" : "Drop audio or video files here";
+  const btn = $("#start-btn");
+  btn.disabled = !staged.length || uploading;
+  btn.textContent = staged.length > 1 ? `Start transcribing ${staged.length} files` : "Start transcribing";
+  $("#start-hint").textContent = uploading ? "Uploading…"
+    : staged.length ? "Check the settings, then start." : "Choose a file first.";
+}
+
+/* remember the last-used settings on this browser */
+for (const id of ["opt-language", "opt-speakers"]) {
+  const saved = store.get(id);
+  if (saved !== null && [...$("#" + id).options].some((o) => o.value === saved)) $("#" + id).value = saved;
+  $("#" + id).addEventListener("change", (e) => store.set(id, e.target.value));
+}
+if (store.get("opt-diarize") !== null) $("#opt-diarize").checked = store.get("opt-diarize") === "1";
+$("#opt-diarize").addEventListener("change", (e) => {
+  store.set("opt-diarize", e.target.checked ? "1" : "0");
+  $("#opt-speakers").disabled = !e.target.checked;
+});
+$("#opt-speakers").disabled = !$("#opt-diarize").checked;
+
+/* ---------------- step 3: upload + start ---------------- */
+let uploading = false;
+let uploadXhr = null;
+
+$("#start-btn").addEventListener("click", startTranscribing);
+
+async function startTranscribing() {
+  if (!staged.length || uploading) return;
+  uploading = true;
+  renderStaged();
+  const opts = {
+    language: $("#opt-language").value,
+    diarize: $("#opt-diarize").checked,
+    speakers: $("#opt-speakers").value,
+  };
+  // Upload everything first (the server queues the jobs and runs them one
+  // by one), then follow whichever job is running.
+  if (watchSource) { watchSource.close(); watchSource = null; watchingJobId = null; }
+  while (staged.length) {
+    const job = await uploadFile(staged[0].file, opts);
+    if (job === "aborted") break;
+    staged.shift();
+    renderStaged();
+    if (job) refreshJobs();
+  }
+  uploading = false;
+  uploadXhr = null;
+  renderStaged();
+  await refreshJobs();
+  followActiveJob();
+}
+
+function uploadFile(file, opts) {
   const fd = new FormData();
   fd.append("file", file);
-  fd.append("language", $("#opt-language").value);
-  fd.append("diarize", $("#opt-diarize").checked);
-  const spk = $("#opt-speakers").value;
-  if (spk) fd.append("num_speakers", spk);
+  fd.append("language", opts.language);
+  fd.append("diarize", opts.diarize);
+  if (opts.diarize && opts.speakers) fd.append("num_speakers", opts.speakers);
 
-  $("#result-card").classList.add("hidden");
+  showProgressCard(file.name);
+  setProgress({ status: "uploading", stage: "uploading", progress: 0 });
+
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    uploadXhr = xhr;
+    xhr.open("POST", "/api/transcribe");
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) {
+        setProgress({ status: "uploading", stage: "uploading", progress: e.loaded / e.total,
+                      detail: `${fmtBytes(e.loaded)} / ${fmtBytes(e.total)}` });
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status === 401) { window.location.href = "/login?next=/"; return; }
+      let body = {};
+      try { body = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(body); return; }
+      toast(`Upload of "${file.name}" failed: ${body.detail || xhr.statusText}`, "err");
+      hideProgressCard();
+      resolve(null);
+    };
+    xhr.onerror = () => {
+      toast(`Upload of "${file.name}" failed — is the server reachable?`, "err");
+      hideProgressCard();
+      resolve(null);
+    };
+    xhr.onabort = () => { hideProgressCard(); toast("Upload cancelled."); resolve("aborted"); };
+    xhr.send(fd);
+  });
+}
+
+/* ---------------- progress card ---------------- */
+let watchingJobId = null;
+let watchSource = null;
+
+function showProgressCard(name) {
   $("#progress-card").classList.remove("hidden");
-  $("#progress-file").textContent = file.name;
-  setProgress({ stage: "uploading", progress: 0, elapsed_seconds: 0 });
+  $("#progress-file").textContent = name;
+  $("#progress-file").title = name;
+  const btn = $("#cancel-job");
+  btn.disabled = false;
+  btn.textContent = "Cancel";
+}
 
-  const resp = await fetch("/api/transcribe", { method: "POST", body: fd });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    alert("Upload failed: " + (err.detail || resp.statusText));
-    $("#progress-card").classList.add("hidden");
-    return;
-  }
-  const job = await resp.json();
-  watchingJobId = job.id;
-  watchJob(job.id);
-  refreshJobs();
+function hideProgressCard() {
+  $("#progress-card").classList.add("hidden");
 }
 
 $("#cancel-job").addEventListener("click", async () => {
+  if (uploading && uploadXhr) { uploadXhr.abort(); return; }
   if (!watchingJobId) return;
-  await fetch(`/api/jobs/${watchingJobId}/cancel`, { method: "POST" });
+  await cancelJob(watchingJobId);
 });
 
+async function cancelJob(jobId) {
+  if (jobId === watchingJobId) {
+    $("#cancel-job").disabled = true;
+    $("#cancel-job").textContent = "Cancelling…";
+    $("#progress-stage").textContent = "cancelling";
+  }
+  const resp = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
+  if (!resp.ok) {
+    toast("Could not cancel: " + await errorText(resp), "err");
+    if (jobId === watchingJobId) { $("#cancel-job").disabled = false; $("#cancel-job").textContent = "Cancel"; }
+  }
+  refreshJobs();
+}
+
+/* Follow one job's progress (server-sent events). Reconnects on network
+   blips; when the job ends, moves on to the next queued/running job. */
 function watchJob(jobId) {
+  if (watchSource) watchSource.close();
+  watchingJobId = jobId;
+  showProgressCard("");
   const es = new EventSource(`/api/jobs/${jobId}/events`);
+  watchSource = es;
   es.onmessage = (e) => {
     const job = JSON.parse(e.data);
-    if (job.id === watchingJobId) setProgress(job);
+    if (job.id !== watchingJobId) return;
+    $("#progress-file").textContent = job.filename;
+    $("#progress-file").title = job.filename;
+    setProgress(job);
+    if (!["done", "error", "cancelled"].includes(job.status)) return;
+    es.close();
+    watchSource = null;
+    watchingJobId = null;
+    hideProgressCard();
     if (job.status === "done") {
-      es.close();
-      if (job.id === watchingJobId) {
-        $("#progress-card").classList.add("hidden");
-        showResult(job);
-      }
-      refreshJobs(); refreshStatus();
-    } else if (job.status === "error" || job.status === "cancelled") {
-      es.close();
-      if (job.id === watchingJobId) {
-        $("#progress-card").classList.add("hidden");
-        if (job.status === "error") alert("Transcription failed: " + job.error);
-      }
-      refreshJobs();
+      // don't yank away a transcript the user is in the middle of editing
+      if (current.editingIdx === null) showResult(job);
+      toast(`✓ "${job.filename}" is done.`, "ok");
+    } else if (job.status === "error") {
+      toast(`"${job.filename}" failed: ${job.error}`, "err");
+    } else {
+      toast(`"${job.filename}" was cancelled.`);
     }
+    refreshJobs().then(followActiveJob);
+    refreshStatus();
   };
-  es.onerror = () => es.close();
+  es.onerror = () => {
+    es.close();
+    if (watchSource !== es) return;
+    watchSource = null;
+    setTimeout(async () => {
+      if (watchingJobId !== jobId) return;
+      const r = await fetch(`/api/jobs/${jobId}`).catch(() => null);
+      if (r && r.status === 404) { watchingJobId = null; hideProgressCard(); return; }  // job deleted
+      watchJob(jobId);
+    }, 2000);
+  };
+}
+
+/* Attach the progress card to whatever is running (page reload, other
+   browser started it, next file in a batch…). */
+function followActiveJob() {
+  if (watchingJobId || uploading) return;
+  const active = lastJobs.find((j) => j.status === "running") || [...lastJobs].reverse().find((j) => j.status === "queued");
+  if (active) watchJob(active.id);
 }
 
 function fmtDur(s) {
   if (s == null) return "";
   s = Math.max(0, Math.round(s));
-  const m = Math.floor(s / 60), r = s % 60;
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  if (h) return `${h}h ${m}m`;
   return m ? `${m}m ${r}s` : `${r}s`;
 }
+
+const STAGE_LABEL = {
+  uploading: "Uploading", queued: "Waiting in queue", "loading models": "Loading models",
+  decoding: "Reading audio", diarizing: "Finding speakers", transcribing: "Transcribing",
+  finalizing: "Finishing", cancelling: "Cancelling", done: "Done", error: "Failed", cancelled: "Cancelled",
+};
 
 function setProgress(job) {
   const pct = Math.round((job.progress || 0) * 100);
   $("#progress-fill").style.width = pct + "%";
   $("#progress-pct").textContent = pct + "%";
-  $("#progress-stage").textContent = job.stage || "";
+  $("#progress-stage").textContent = STAGE_LABEL[job.stage] || job.stage || "";
+  let detail = job.detail || "";
+  if (job.stage === "transcribing" && job.chunks_total) detail = `part ${job.chunks_done} of ${job.chunks_total}`;
+  if (job.stage === "queued") {
+    const ahead = lastJobs.filter((j) => (j.status === "running" || j.status === "queued") && j.created_at < job.created_at).length;
+    detail = ahead ? `${ahead} job${ahead > 1 ? "s" : ""} ahead` : "starting soon";
+  }
+  $("#progress-detail").textContent = detail;
   $("#progress-eta").textContent =
     job.eta_seconds != null && job.status === "running" && job.stage === "transcribing"
-      ? "~" + fmtDur(job.eta_seconds) + " remaining" : "";
+      ? "~" + fmtDur(job.eta_seconds) + " left" : "";
   $("#progress-elapsed").textContent =
     job.elapsed_seconds ? "elapsed " + fmtDur(job.elapsed_seconds) : "";
+  if (job.cancel_requested) {
+    $("#cancel-job").disabled = true;
+    $("#cancel-job").textContent = "Cancelling…";
+  }
 }
 
 /* ================= RESULT: karaoke player + editor ================= */
@@ -203,11 +422,11 @@ function showResult(job) {
   current.editingIdx = null;
   current.loop = null;
   $("#result-card").classList.remove("hidden");
+  $("#rediarize-panel").classList.add("hidden");
+  $$(".job-row").forEach((r) => r.classList.toggle("selected", r.dataset.id === job.id));
   $("#result-title").textContent = job.filename;
   const r = job.result;
-  $("#result-meta").textContent =
-    `${fmtDur(r.duration)} · ${(r.speakers || []).length} speaker(s) · language: ${r.language || "auto"} · ` +
-    `model: ${r.model}` + (r.edited ? " · edited" : "");
+  renderResultMeta();
   // e.g. diarization was requested but the diarizer couldn't load — the
   // transcript is still here, just without speaker labels.
   const warn = $("#result-warnings");
@@ -224,6 +443,14 @@ function showResult(job) {
   renderSegments();
 }
 
+function renderResultMeta() {
+  const r = current.result;
+  const n = allSpeakers().length;
+  $("#result-meta").textContent =
+    `${fmtDur(r.duration)} · ${n} speaker${n === 1 ? "" : "s"} · language: ${LANG_NAME[r.language] || r.language || "auto"} · ` +
+    `model: ${r.model}` + (r.edited ? " · edited" : "");
+}
+
 /* ---------- speaker bar (rename speakers) ---------- */
 function allSpeakers() {
   // nulls (undiarized lines) aren't renameable speakers — skip them
@@ -237,7 +464,7 @@ function renderSpeakerBar() {
   if (!speakers.length) return;
   const label = document.createElement("span");
   label.className = "bar-label";
-  label.textContent = "Speakers (click to rename / recolour):";
+  label.textContent = "Speakers (click to rename, recolour or merge):";
   bar.appendChild(label);
   for (const spk of speakers) {
     const chip = document.createElement("span");
@@ -253,6 +480,7 @@ function openSpeakerPopover(bar, chip, spk) {
   const pop = document.createElement("span");
   pop.className = "spk-popover";
   let chosen = colorIdx(spk);
+  const startColor = chosen;
 
   const input = document.createElement("input");
   input.value = spk;
@@ -277,12 +505,15 @@ function openSpeakerPopover(bar, chip, spk) {
 
   const commit = async () => {
     const name = input.value.trim() || spk;
+    const merging = name !== spk && allSpeakers().includes(name);
+    if (merging && !confirm(`"${name}" already exists.\n\nMerge all of ${spk}'s lines into ${name}?`)) return;
     if (name !== spk) {
       current.result.segments.forEach((s) => { if (s.speaker === spk) s.speaker = name; });
     }
     const colors = { ...(current.result.speaker_colors || {}) };
     delete colors[spk];
-    colors[name] = chosen;
+    // merging keeps the target's colour unless a different swatch was picked
+    if (!merging || chosen !== startColor) colors[name] = chosen;
     current.result.speaker_colors = colors;
     await saveResult();
     renderSpeakerBar(); renderSegments();
@@ -384,7 +615,10 @@ function commitEdit(rerender = true) {
   const sel = $("#segments .seg-toolbar select");
   const idx = current.editingIdx;
   const seg = current.result.segments[idx];
-  if (ta) seg.text = ta.value.trim();
+  if (ta && ta.value.trim() !== seg.text) {
+    seg.text = ta.value.trim();
+    delete seg.words;  // word timings no longer match the text
+  }
   if (sel && sel.value !== "__new__") seg.speaker = sel.value || null;  // "" = unassigned
   if (!seg.text) current.result.segments.splice(idx, 1);  // saving an empty line deletes it
   current.editingIdx = null;
@@ -438,7 +672,7 @@ function buildEditorRow(seg, idx) {
         select.insertBefore(opt, newOpt);
         select.value = name.trim();
       } else {
-        select.value = seg.speaker;
+        select.value = seg.speaker || "";
       }
     }
   });
@@ -481,6 +715,12 @@ function splitLine(idx, ta) {
   const frac = Math.min(0.95, Math.max(0.05, pos / ta.value.length));
   const mid = seg.start + (seg.end - seg.start) * frac;
   const rightSeg = { start: Math.round(mid * 1000) / 1000, end: seg.end, speaker: seg.speaker, text: right };
+  if (ta.value.trim() === seg.text && seg.words) {
+    rightSeg.words = seg.words.filter((w) => w.start >= rightSeg.start);
+    seg.words = seg.words.filter((w) => w.start < rightSeg.start);
+  } else {
+    delete seg.words;
+  }
   seg.text = left;
   seg.end = rightSeg.start;
   current.result.segments.splice(idx + 1, 0, rightSeg);
@@ -494,6 +734,8 @@ function mergeUp(idx, currentText) {
   if (idx <= 0) return;
   const prev = current.result.segments[idx - 1];
   const seg = current.result.segments[idx];
+  if (prev.words && seg.words && currentText.trim() === seg.text) prev.words = prev.words.concat(seg.words);
+  else delete prev.words;
   prev.text = joinTexts(prev.text, currentText);
   prev.end = Math.max(prev.end, seg.end);
   current.result.segments.splice(idx, 1);
@@ -536,80 +778,141 @@ async function saveResult() {
   if (resp.ok) {
     const data = await resp.json();
     current.result = data.result;
-    $("#result-meta").textContent = $("#result-meta").textContent.includes("· edited")
-      ? $("#result-meta").textContent
-      : $("#result-meta").textContent + " · edited";
+    renderResultMeta();
   } else {
-    alert("Could not save edit: " + ((await resp.json().catch(() => ({}))).detail || resp.statusText));
+    toast("Could not save edit: " + await errorText(resp), "err");
   }
 }
+
+/* ---------- re-detect speakers ---------- */
+$("#rediarize-open").addEventListener("click", () => {
+  if (!current.result) return;
+  const panel = $("#rediarize-panel");
+  panel.classList.toggle("hidden");
+  if (!panel.classList.contains("hidden")) {
+    const n = allSpeakers().length;
+    $("#rediarize-count").value = n >= 1 && n <= 10 ? String(n) : "";
+    $("#rediarize-count").focus();
+  }
+});
+$("#rediarize-cancel").addEventListener("click", () => $("#rediarize-panel").classList.add("hidden"));
+$("#rediarize-go").addEventListener("click", async () => {
+  if (!current.jobId) return;
+  commitEdit(false);
+  const btn = $("#rediarize-go");
+  btn.disabled = true;
+  const count = $("#rediarize-count").value;
+  const resp = await fetch(`/api/jobs/${current.jobId}/rediarize`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ num_speakers: count ? Number(count) : null }),
+  });
+  btn.disabled = false;
+  if (!resp.ok) { toast("Could not start: " + await errorText(resp), "err"); return; }
+  $("#rediarize-panel").classList.add("hidden");
+  toast("Re-detecting speakers — the new transcript will open when it is ready.");
+  await refreshJobs();
+  followActiveJob();
+});
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 /* ---------------- job history ---------------- */
+const LANG_NAME = { yue: "Cantonese", zh: "Mandarin", en: "English" };
+
+function fmtWhen(epoch) {
+  if (!epoch) return "";
+  const d = new Date(epoch * 1000);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return sameDay
+    ? d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+      d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function jobMeta(job) {
+  const bits = [];
+  if (job.audio_duration) bits.push(fmtDur(job.audio_duration));
+  if (job.status === "done") {
+    if (job.speaker_count) bits.push(`${job.speaker_count} speaker${job.speaker_count > 1 ? "s" : ""}`);
+    const lang = job.language || job.params.language;
+    if (lang) bits.push(LANG_NAME[lang] || lang);
+  } else if (job.params.num_speakers) {
+    bits.push(`${job.params.num_speakers} speakers`);
+  }
+  if (job.params.rediarize_from) bits.push("re-detected");
+  bits.push(fmtWhen(job.created_at));
+  return bits.filter(Boolean).join(" · ");
+}
+
 async function refreshJobs() {
-  const data = await fetch("/api/jobs").then((r) => r.json()).catch(() => null);
-  if (!data) return;
+  const resp = await fetch("/api/jobs").catch(() => null);
+  if (!resp || !resp.ok) return;
+  lastJobs = (await resp.json()).jobs;
   const list = $("#job-list");
   list.innerHTML = "";
-  if (!data.jobs.length) { list.innerHTML = '<div class="empty">No jobs yet</div>'; return; }
-  for (const job of data.jobs) {
+  if (!lastJobs.length) { list.innerHTML = '<div class="empty">No jobs yet — finished transcripts appear here.</div>'; return; }
+  for (const job of lastJobs) {
+    const active = job.status === "running" || job.status === "queued";
     const row = document.createElement("div");
-    row.className = "job-row";
+    row.className = "job-row" + (job.id === current.jobId ? " selected" : "");
+    row.dataset.id = job.id;
+    row.tabIndex = 0;
+    const statusText = job.cancel_requested && active ? "cancelling" : job.status;
     row.innerHTML = `
-      <span class="job-name"></span>
-      <span class="job-sub">${job.audio_duration ? fmtDur(job.audio_duration) : ""}</span>
-      <span class="job-status ${job.status}">${job.status}</span>
-      <span class="job-actions"></span>`;
+      <div class="job-main">
+        <div class="job-name"></div>
+        <div class="job-meta"><span class="job-status ${job.status}">${statusText}</span>
+          <span class="job-sub"></span></div>
+        ${job.status === "running" ? `<div class="job-bar"><div style="width:${Math.round(job.progress * 100)}%"></div></div>` : ""}
+      </div>
+      <button class="icon-btn danger job-act"></button>`;
     row.querySelector(".job-name").textContent = job.filename;
-    const actions = row.querySelector(".job-actions");
-    if (job.status === "running" || job.status === "queued") {
-      const btn = document.createElement("button");
-      btn.className = "icon-btn danger"; btn.textContent = "■ Cancel"; btn.title = "Cancel this job";
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        await fetch(`/api/jobs/${job.id}/cancel`, { method: "POST" });
-        refreshJobs();
-      });
-      actions.appendChild(btn);
+    row.querySelector(".job-name").title = job.filename;
+    row.querySelector(".job-sub").textContent = jobMeta(job);
+    const btn = row.querySelector(".job-act");
+    if (active) {
+      btn.textContent = "■";
+      btn.title = "Cancel this job";
+      btn.setAttribute("aria-label", "Cancel " + job.filename);
+      btn.disabled = job.cancel_requested;
+      btn.addEventListener("click", (e) => { e.stopPropagation(); cancelJob(job.id); });
     } else {
-      const btn = document.createElement("button");
-      btn.className = "icon-btn danger"; btn.textContent = "🗑"; btn.title = "Delete this job (audio + transcript)";
-      btn.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        if (!confirm(`Delete "${job.filename}" (audio + transcript)?`)) return;
-        const resp = await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
-        if (!resp.ok) {
-          const err = await resp.json().catch(() => ({}));
-          alert("Could not delete: " + (err.detail || resp.statusText));
-        } else if (current.jobId === job.id) {
-          player.pause();
-          player.removeAttribute("src");
-          $("#result-card").classList.add("hidden");
-          current.jobId = null;
-        }
-        refreshJobs();
-      });
-      actions.appendChild(btn);
+      btn.textContent = "🗑";
+      btn.title = "Delete this job (audio + transcript)";
+      btn.setAttribute("aria-label", "Delete " + job.filename);
+      btn.addEventListener("click", (e) => { e.stopPropagation(); deleteJob(job); });
     }
-    row.addEventListener("click", async () => {
-      const full = await fetch(`/api/jobs/${job.id}`).then((r) => r.json());
-      if (full.status === "done") {
-        showResult(full);
-        $("#result-card").scrollIntoView({ behavior: "smooth" });
-      } else if (full.status === "running" || full.status === "queued") {
-        watchingJobId = full.id;
-        $("#progress-card").classList.remove("hidden");
-        $("#progress-file").textContent = full.filename;
-        watchJob(full.id);
-      } else if (full.status === "error") {
-        alert("This job failed: " + full.error);
-      }
-    });
+    const open = () => openJob(job);
+    row.addEventListener("click", open);
+    row.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
     list.appendChild(row);
   }
+}
+
+async function openJob(job) {
+  if (job.status === "running" || job.status === "queued") { watchJob(job.id); return; }
+  if (job.status === "error") { toast("This job failed: " + job.error, "err"); return; }
+  if (job.status === "cancelled") { toast("This job was cancelled — there is no transcript."); return; }
+  const resp = await fetch(`/api/jobs/${job.id}`);
+  if (!resp.ok) { toast("Could not open: " + await errorText(resp), "err"); return; }
+  showResult(await resp.json());
+  $("#result-card").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function deleteJob(job) {
+  if (!confirm(`Delete "${job.filename}"?\n\nThe transcript and the stored audio are removed for good.`)) return;
+  const resp = await fetch(`/api/jobs/${job.id}`, { method: "DELETE" });
+  if (!resp.ok) { toast("Could not delete: " + await errorText(resp), "err"); }
+  else if (current.jobId === job.id) {
+    player.pause();
+    player.removeAttribute("src");
+    $("#result-card").classList.add("hidden");
+    current.jobId = null;
+    current.result = null;
+  }
+  refreshJobs();
 }
 
 /* ---------------- models ---------------- */
@@ -649,7 +952,7 @@ function syncSearchRows(sttEntries) {
         refreshModels();
       });
     } else if (m.download && m.download.status === "error") {
-      cell.innerHTML = `<div class="dl-error">${m.download.error}</div>
+      cell.innerHTML = `<div class="dl-error">${escapeHtml(m.download.error || "")}</div>
                         <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
       cell.querySelector("[data-dl-repo]").addEventListener("click", async (e) => {
         e.target.disabled = true;
@@ -689,14 +992,6 @@ function renderSelectors(data) {
   fill("#sel-diar", data.diarization);
 }
 
-function fmtBytes(n) {
-  if (!n) return "0 MB";
-  const units = ["B", "KB", "MB", "GB"];
-  let i = 0;
-  while (n >= 1024 && i < 3) { n /= 1024; i++; }
-  return n.toFixed(1) + " " + units[i];
-}
-
 function dlProgressText(dl) {
   if (!dl.total_bytes) return "downloading… " + fmtBytes(dl.downloaded_bytes);
   const pct = Math.round(dl.progress * 100);
@@ -722,7 +1017,7 @@ function renderCatalog(container, entries) {
       action = `<div class="dl-progress">${dlProgressText(m.download)}</div>
                 <button class="btn danger small" data-cancel-dl="${m.repo_id}">✕ Cancel</button>`;
     } else if (m.download && m.download.status === "error") {
-      action = `<div class="dl-error">${m.download.error}</div>
+      action = `<div class="dl-error">${escapeHtml(m.download.error || "")}</div>
                 <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
     } else if (m.downloaded) {
       action = (m.loaded || m.selected)
@@ -997,10 +1292,50 @@ async function refreshNetwork() {
   }
 }
 
-/* ---------------- init ---------------- */
+/* ---------------- dashboard: server log ---------------- */
+async function refreshLogs() {
+  const resp = await fetch("/api/logs?lines=300").catch(() => null);
+  if (!resp || !resp.ok) return;
+  const data = await resp.json();
+  const view = $("#log-view");
+  const atBottom = view.scrollTop + view.clientHeight >= view.scrollHeight - 20;
+  view.textContent = data.lines.length ? data.lines.join("\n") : "(empty)";
+  if (atBottom) view.scrollTop = view.scrollHeight;
+  if (document.activeElement !== $("#log-mode")) $("#log-mode").value = data.access_log;
+  $("#log-file-hint").textContent =
+    `Full log file on the server: ${data.file} (rotates at 5 MB, keeps 3 old files).`;
+}
+$("#log-refresh").addEventListener("click", refreshLogs);
+$("#log-download").addEventListener("click", () => window.open("/api/logs/download", "_blank"));
+$("#log-clear").addEventListener("click", async () => {
+  if (!confirm("Clear the log? The current log file is moved to sst.log.1.")) return;
+  await fetch("/api/logs/clear", { method: "POST" });
+  refreshLogs();
+});
+$("#log-mode").addEventListener("change", async (e) => {
+  const resp = await fetch("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_log: e.target.value, load_now: false }),
+  });
+  if (!resp.ok) toast(await errorText(resp), "err");
+  else toast("Log setting saved.", "ok");
+});
+
+/* ---------------- init + polling ----------------
+   Poll only while this tab is visible: a backgrounded browser tab
+   shouldn't keep hitting the server (and filling its log). */
+function activeTab() { return $(".nav-item.active").dataset.tab; }
+
+function poll() {
+  if (document.hidden) return;
+  refreshStatus();
+  refreshJobs().then(followActiveJob);
+  if (activeTab() === "dashboard") refreshLogs();
+}
+
 refreshStatus();
-refreshJobs();
+refreshJobs().then(followActiveJob);
 refreshModels();
 refreshNetwork();
-setInterval(refreshStatus, 10000);
-setInterval(refreshJobs, 8000);
+setInterval(poll, 10000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) poll(); });

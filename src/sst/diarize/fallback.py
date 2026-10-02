@@ -6,6 +6,8 @@ overlapping speech, but solid for meetings and interviews.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 import torch
 
@@ -45,6 +47,7 @@ class BuiltinDiarizer(Diarizer):
         speech: list[tuple[float, float]] | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
+        progress: Callable[[float], None] | None = None,
     ) -> list[SpeakerTurn]:
         if speech is None:
             speech = detect_speech(audio)
@@ -62,7 +65,7 @@ class BuiltinDiarizer(Diarizer):
         if not windows:
             windows = [(s, e) for s, e in speech]
 
-        embeddings = self._embed(audio, windows)
+        embeddings = self._embed(audio, windows, progress)
         labels = self._cluster(embeddings, num_speakers, min_speakers, max_speakers)
         if num_speakers is None:
             labels = _drop_tiny_clusters(labels, embeddings, windows, min_speakers)
@@ -93,7 +96,8 @@ class BuiltinDiarizer(Diarizer):
         return turns
 
     @torch.inference_mode()
-    def _embed(self, audio: np.ndarray, windows: list[tuple[float, float]]) -> np.ndarray:
+    def _embed(self, audio: np.ndarray, windows: list[tuple[float, float]],
+               progress: Callable[[float], None] | None = None) -> np.ndarray:
         embs = []
         spans = []
         for start, end in windows:
@@ -111,6 +115,8 @@ class BuiltinDiarizer(Diarizer):
             wavs = torch.from_numpy(padded)
             out = self.encoder.encode_batch(wavs, wav_lens=lens).squeeze(1).cpu().numpy()
             embs.append(out)
+            if progress:
+                progress(0.95 * min(i + 64, len(spans)) / len(spans))
         result = np.concatenate(embs, axis=0)
         norms = np.linalg.norm(result, axis=1, keepdims=True)
         return result / np.maximum(norms, 1e-8)
