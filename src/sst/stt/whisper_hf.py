@@ -2,37 +2,26 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 from typing import Callable
 
 import numpy as np
 import torch
-from transformers import (
-    AutoModelForSpeechSeq2Seq,
-    AutoProcessor,
-    StoppingCriteria,
-    StoppingCriteriaList,
-    pipeline,
-)
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
 # The ASR pipeline passes return_token_timestamps internally for word
 # timestamps; transformers warns it will change in v5 (we pin <5).
 warnings.filterwarnings("ignore", message=".*return_token_timestamps.*")
 
-# The ASR pipeline imports torchcodec on *every* call just to check whether
-# the input is a torchcodec decoder. When torchcodec can't load its native
-# libraries (e.g. Homebrew moved to an ffmpeg major version it doesn't
-# support yet) that import raises and every transcription fails. We only ever
-# pass in-memory arrays (ffmpeg decoding happens in sst.audio), so tell the
-# pipeline torchcodec is absent.
-import transformers.pipelines.automatic_speech_recognition as _asr_pipeline  # noqa: E402
-
-_asr_pipeline.is_torchcodec_available = lambda: False
-
+from .. import _compat  # noqa: F401  — before the ASR pipeline runs
 from ..audio import SAMPLE_RATE
 from ..config import config
 from ..device import pick_dtype
 from .base import SttEngine, SttSegment, Word
+from .cancel import cancel_criteria
+
+log = logging.getLogger("sst.whisper")
 
 
 class WhisperEngine(SttEngine):
@@ -56,6 +45,20 @@ class WhisperEngine(SttEngine):
         )
         self.is_multilingual = getattr(self.model.config, "vocab_size", 0) >= 51865
 
+    def _supported_language(self, language: str | None) -> str | None:
+        """The language token to force, or None for auto-detect. Cantonese
+        (`yue`) exists only in large-v3 models; older ones get Chinese instead
+        of failing the whole job."""
+        if not language or language == "auto" or not self.is_multilingual:
+            return None
+        known = getattr(self.model.generation_config, "lang_to_id", None) or {}
+        if not known or f"<|{language}|>" in known:
+            return language
+        fallback = "zh" if language == "yue" and "<|zh|>" in known else None
+        log.warning("this Whisper model has no '%s' language token — using %s instead",
+                    language, fallback or "auto-detect")
+        return fallback
+
     @torch.inference_mode()
     def detect_language(self, audio: np.ndarray) -> str:
         """Detect the dominant language of an audio chunk ('' if unavailable)."""
@@ -73,15 +76,14 @@ class WhisperEngine(SttEngine):
 
     def transcribe_chunk(
         self, audio: np.ndarray, language: str | None,
-        should_stop: Callable[[], bool] | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> list[SttSegment]:
         generate_kwargs: dict = {"task": "transcribe"}
-        if language and language != "auto" and self.is_multilingual:
+        language = self._supported_language(language)
+        if language:
             generate_kwargs["language"] = language
-        if should_stop is not None:
-            # checked after every generated token, so Cancel takes effect in
-            # well under a second even on a slow machine
-            generate_kwargs["stopping_criteria"] = StoppingCriteriaList([_StopWhen(should_stop)])
+        if check_cancelled is not None:
+            generate_kwargs["stopping_criteria"] = cancel_criteria(check_cancelled)
 
         result = self.pipe(
             {"array": audio, "sampling_rate": SAMPLE_RATE},
@@ -108,11 +110,3 @@ class WhisperEngine(SttEngine):
         seg_end = words[-1].end if words else duration
         return [SttSegment(start=seg_start, end=seg_end, text=text, words=words)]
 
-
-class _StopWhen(StoppingCriteria):
-    def __init__(self, should_stop: Callable[[], bool]) -> None:
-        self.should_stop = should_stop
-
-    def __call__(self, input_ids: torch.LongTensor, scores, **kwargs) -> torch.BoolTensor:
-        return torch.full((input_ids.shape[0],), bool(self.should_stop()),
-                          dtype=torch.bool, device=input_ids.device)

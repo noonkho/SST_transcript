@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import mimetypes
+import os
 import re
 import shutil
 import socket
@@ -59,9 +60,10 @@ from .openai_compat import (
     model_entry,
     type_for_status,
 )
-from .jobs import jobs
+from .jobs import AUDIO_DIR, jobs
 from .manager import manager
-from .pipeline import run_rediarization, run_transcription
+from . import script, speed
+from .pipeline import run_rediarization, run_transcription, words_match
 from .registry import CATALOG, DIARIZATION_CATALOG, STT_CATALOG, classify_hf_model, find_entry
 
 log = logging.getLogger("sst.server")
@@ -248,6 +250,26 @@ def _submit(file: UploadFile, params: dict):
     )
 
 
+def _int_param(body: dict, key: str, lo: int, hi: int, *, optional: bool = False) -> int | None:
+    """body[key] as an int in [lo, hi], else HTTP 400. Optional: missing/""/0 -> None."""
+    value = body.get(key)
+    if optional and value in (None, "", 0):
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = None
+    if n is None or not lo <= n <= hi:
+        raise HTTPException(400, f"{key} must be a whole number from {lo} to {hi}")
+    return n
+
+
+def _chinese_script(value: str) -> str | None:
+    if value and value not in script.SCRIPTS:
+        raise HTTPException(400, f"chinese_script must be one of {list(script.SCRIPTS)}")
+    return value or None
+
+
 def _attachment_headers(filename: str) -> dict:
     """Content-Disposition that survives non-ASCII filenames (RFC 5987)."""
     ascii_name = filename.encode("ascii", "replace").decode().replace('"', "_")
@@ -376,12 +398,14 @@ def openai_transcriptions(
     min_speakers: int | None = Form(None),
     max_speakers: int | None = Form(None),
     diarization_model: str = Form(""),
+    # traditional_hk | traditional_tw | simplified — convert Chinese characters
+    chinese_script: str = Form(""),
     stream_progress: bool = False,   # query param: ?stream_progress=true -> NDJSON
 ):
     """OpenAI-compatible transcription. Blocks until the result is ready.
 
     Extensions beyond OpenAI: `diarize`, `num_speakers`, `min_speakers`,
-    `max_speakers`, `diarization_model`;
+    `max_speakers`, `diarization_model`, `chinese_script`;
     every JSON response includes diarized `segments`.
     """
     if response_format not in OPENAI_FORMATS:
@@ -404,6 +428,7 @@ def openai_transcriptions(
         "min_speakers": min_speakers,
         "max_speakers": max_speakers,
         "diarization_model": diarization_model or None,
+        "chinese_script": _chinese_script(chinese_script),
     })
     if stream_progress:
         return StreamingResponse(_ndjson_progress(job, response_format),
@@ -477,6 +502,7 @@ def api_status():
         "version": __version__,
         "running": True,
         "ffmpeg": ffmpeg_available(),
+        "supported_extensions": sorted(SUPPORTED_EXTENSIONS),
         **manager.status(),
         "config": {
             "stt_model": config.stt_model,
@@ -596,10 +622,7 @@ def api_config(body: dict):
             if key in ("stt_model", "diarization_model"):
                 changed_models = True
     if "max_jobs" in body:
-        try:
-            config.max_jobs = max(3, min(20, int(body["max_jobs"])))
-        except (TypeError, ValueError):
-            raise HTTPException(400, "max_jobs must be a number between 3 and 20") from None
+        config.max_jobs = _int_param(body, "max_jobs", 3, 20)
         jobs.enforce_limit()
 
     if "access_log" in body:
@@ -624,11 +647,7 @@ def api_config(body: dict):
     # port
     restart_needed = False
     if "port" in body:
-        try:
-            p = int(body["port"])
-            assert 1024 <= p <= 65535
-        except (TypeError, ValueError, AssertionError):
-            raise HTTPException(400, "Port must be 1024-65535") from None
+        p = _int_param(body, "port", 1024, 65535)
         if p != config.port:
             config.port = p
             restart_needed = True
@@ -759,6 +778,7 @@ def api_transcribe(
     num_speakers: int | None = Form(None),
     min_speakers: int | None = Form(None),
     max_speakers: int | None = Form(None),
+    chinese_script: str = Form(""),
 ):
     job = _submit(file, {
         "language": language or None,
@@ -766,13 +786,14 @@ def api_transcribe(
         "num_speakers": num_speakers,
         "min_speakers": min_speakers,
         "max_speakers": max_speakers,
+        "chinese_script": _chinese_script(chinese_script),
     })
-    return job.public()
+    return jobs.view(job)
 
 
 @app.get("/api/jobs")
 def api_jobs():
-    return {"jobs": [j.public() for j in jobs.all()]}
+    return {"jobs": [jobs.view(j) for j in jobs.all()]}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -780,7 +801,7 @@ def api_job(job_id: str):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    return job.public(include_result=True)
+    return jobs.view(job, include_result=True)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -788,7 +809,7 @@ def api_job_cancel(job_id: str):
     job = jobs.cancel(job_id)
     if not job:
         raise HTTPException(404, "job not found")
-    return job.public()
+    return jobs.view(job)
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -815,44 +836,68 @@ def api_job_rediarize(job_id: str, body: dict):
     if not src.audio_path or not Path(src.audio_path).exists():
         raise HTTPException(409, "this job's audio is no longer stored — transcribe the file again")
 
-    def count(key: str) -> int | None:
-        value = body.get(key)
-        if value in (None, "", 0):
-            return None
-        try:
-            n = int(value)
-        except (TypeError, ValueError):
-            raise HTTPException(400, f"{key} must be a whole number") from None
-        if not 1 <= n <= 20:
-            raise HTTPException(400, f"{key} must be between 1 and 20")
-        return n
-
     params = {
         "language": src.params.get("language"),
         "diarize": True,
-        "num_speakers": count("num_speakers"),
-        "min_speakers": count("min_speakers"),
-        "max_speakers": count("max_speakers"),
+        **{k: _int_param(body, k, 1, 20, optional=True)
+           for k in ("num_speakers", "min_speakers", "max_speakers")},
         "rediarize_from": src.id,
     }
-    source = json.loads(json.dumps(src.result))  # snapshot: later edits to src don't leak in
-    suffix = Path(src.audio_path).suffix
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="sst_")
-    tmp.close()
-    shutil.copyfile(src.audio_path, tmp.name)
+    # Edits replace job.result with a new dict (never mutate it), so holding the
+    # current one is a stable snapshot.
+    source = src.result
+    # Hard-link the stored audio instead of copying it (same folder, so
+    # submit()'s move is a rename); fall back to a copy where links fail.
+    staged = AUDIO_DIR / f"incoming_{src.id}_{time.time_ns()}{Path(src.audio_path).suffix}"
+    try:
+        os.link(src.audio_path, staged)
+    except OSError:
+        shutil.copyfile(src.audio_path, staged)
 
     def work(job):
         return run_rediarization(job, job.audio_path, source)
 
-    job = jobs.submit(filename=src.filename, params=params, fn=work, audio_src=tmp.name)
-    return job.public()
+    job = jobs.submit(filename=src.filename, params=params, fn=work, audio_src=str(staged))
+    return jobs.view(job)
+
+
+@app.post("/api/jobs/{job_id}/convert")
+def api_job_convert(job_id: str, body: dict):
+    """Convert a finished transcript to Traditional (HK/TW) or Simplified Chinese.
+    Saved like an edit, so exports and the editor show the converted text."""
+    job = jobs.get(job_id)
+    if not job or job.status != "done" or not job.result:
+        raise HTTPException(404, "no finished result for this job")
+    target = _chinese_script(body.get("script", ""))
+    if not target:
+        raise HTTPException(400, f"script must be one of {list(script.SCRIPTS)}")
+    result = script.convert_result(job.result, target)
+    result["edited"] = True
+    jobs.update_result(job, result)
+    return {"ok": True, "result": result}
+
+
+@app.get("/api/estimate")
+def api_estimate(seconds: float, diarize: bool = True):
+    """Expected processing time for `seconds` of audio, plus the remaining work
+    already in the queue (running job's time left + queued files)."""
+    own = speed.estimate(max(0.0, seconds), diarize)
+    queue = 0.0
+    for j in jobs.all():
+        if j.status == "running":
+            queue += j.eta_seconds if j.eta_seconds is not None else \
+                speed.estimate(j.audio_duration, j.params.get("diarize", True))["seconds"]
+        elif j.status == "queued":
+            queue += speed.estimate(j.audio_duration, j.params.get("diarize", True))["seconds"]
+    return {**own, "queue_seconds": round(queue, 1)}
 
 
 # ------------------------------------------------------------------- logs
 
 @app.get("/api/logs")
 def api_logs(lines: int = 300):
-    return {"lines": logs.tail(max(1, min(lines, 500))), "access_log": config.access_log,
+    tail, count = logs.tail(max(1, min(lines, 500)))
+    return {"lines": tail, "count": count, "access_log": config.access_log,
             "file": str(logs.LOG_FILE)}
 
 
@@ -905,14 +950,15 @@ def api_job_update_result(job_id: str, body: dict):
                 "speaker": str(speaker)[:80] if speaker else None,
                 "text": str(seg["text"]),
             }
-            # Word timings survive edits that keep the line's text (renames,
-            # speaker changes); the editor drops them when the text changes.
-            # They power verbose_json and "Re-detect speakers".
-            if isinstance(seg.get("words"), list):
+            # Word timings (for verbose_json and "Re-detect speakers") are kept
+            # only while they still spell the line — any client that edits the
+            # text without updating them gets them dropped here.
+            words = seg.get("words")
+            if isinstance(words, list) and words_match(words, item["text"]):
                 item["words"] = [
                     {"word": str(w["word"]), "start": round(float(w["start"]), 3),
                      "end": round(float(w["end"]), 3)}
-                    for w in seg["words"]
+                    for w in words
                 ]
             cleaned.append(item)
         except (KeyError, TypeError, ValueError):
@@ -931,7 +977,9 @@ def api_job_update_result(job_id: str, body: dict):
             if isinstance(idx, (int, float)) and str(name) in (result["speakers"] or [])
         }
     jobs.update_result(job, result)
-    return {"ok": True, "result": result}
+    # the client already has the segments; send back only what the server derived
+    return {"ok": True, "speakers": result["speakers"], "text": result["text"],
+            "edited": True, "speaker_colors": result.get("speaker_colors", {})}
 
 
 @app.get("/api/jobs/{job_id}/events")
@@ -942,7 +990,7 @@ async def api_job_events(job_id: str):
 
     async def stream():
         while True:
-            payload = job.public(include_result=job.finished)
+            payload = jobs.view(job, include_result=job.finished)
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             if job.finished:
                 return

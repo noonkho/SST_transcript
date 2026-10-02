@@ -31,8 +31,8 @@ class SttEngine:
 
     def transcribe_chunk(
         self, audio: np.ndarray, language: str | None,
-        should_stop: Callable[[], bool] | None = None,
+        check_cancelled: Callable[[], None] | None = None,
     ) -> list[SttSegment]:
-        """`should_stop()` turning True (job cancelled) may end the chunk early;
-        the caller discards the partial result."""
+        """`check_cancelled()` raises when the job was cancelled; engines that
+        generate token by token should call it inside their loop."""
         raise NotImplementedError

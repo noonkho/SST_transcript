@@ -20,6 +20,9 @@ dependencies = [
     "soundfile>=0.12",
     "requests>=2.31",
     "python-docx>=1.1",
+    "qwen-asr>=0.0.6",
+    "opencc>=1.1.9",
+    "numba>=0.60",
 ]
 
 [project.optional-dependencies]

@@ -22,7 +22,6 @@ import logging
 import logging.config
 import logging.handlers
 import threading
-import warnings
 
 from .config import DATA_DIR, config
 
@@ -30,13 +29,9 @@ LOG_DIR = DATA_DIR / "logs"
 LOG_FILE = LOG_DIR / "sst.log"
 ACCESS_MODES = ("quiet", "full", "off")
 
-# pyannote imports torchcodec for file decoding and prints a 60-line warning
-# when it can't load. We always hand pyannote an in-memory waveform, so the
-# warning is noise.
-warnings.filterwarnings("ignore", message=r"(?s).*torchcodec is not installed correctly.*")
-
 _tail: collections.deque[str] = collections.deque(maxlen=500)
 _tail_lock = threading.Lock()
+_emitted = 0  # lines ever written to the tail — lets the UI skip unchanged refreshes
 
 
 class QuietAccessFilter(logging.Filter):
@@ -67,19 +62,24 @@ class TailHandler(logging.Handler):
             line = self.format(record)
         except Exception:  # noqa: BLE001
             return
+        global _emitted
         with _tail_lock:
             _tail.append(line)
+            _emitted += 1
 
 
-def tail(lines: int = 300) -> list[str]:
+def tail(lines: int = 300) -> tuple[list[str], int]:
+    """The last `lines` lines, plus a counter that changes whenever a line is added."""
     with _tail_lock:
-        return list(_tail)[-lines:]
+        return list(_tail)[-lines:], _emitted
 
 
 def clear() -> None:
     """Empty the in-memory tail and start a fresh log file (old file kept as sst.log.1)."""
+    global _emitted
     with _tail_lock:
         _tail.clear()
+        _emitted += 1
     for handler in logging.getLogger().handlers:
         if isinstance(handler, logging.handlers.RotatingFileHandler):
             handler.doRollover()
@@ -120,7 +120,5 @@ def logging_config() -> dict:
     }
 
 
-def setup() -> dict:
-    cfg = logging_config()
-    logging.config.dictConfig(cfg)
-    return cfg
+def setup() -> None:
+    logging.config.dictConfig(logging_config())

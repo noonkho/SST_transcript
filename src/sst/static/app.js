@@ -7,6 +7,7 @@ const $$ = (sel) => [...document.querySelectorAll(sel)];
 /* Current transcript being shown/edited */
 const current = { jobId: null, filename: "", result: null, editingIdx: null, loop: null };
 let lastJobs = [];
+const isActive = (job) => job.status === "running" || job.status === "queued";
 
 /* ---------------- tabs ---------------- */
 $$(".nav-item").forEach((btn) => {
@@ -34,6 +35,10 @@ async function refreshStatus() {
     $("#d-stt").textContent = s.stt_loaded || "not loaded yet";
     $("#d-diar").textContent = s.diarization_loaded || "not loaded yet";
     $("#ffmpeg-warning").style.display = s.ffmpeg ? "none" : "block";
+    if (s.supported_extensions) {
+      supportedExt = new Set(s.supported_extensions);
+      fileInput.accept = "audio/*,video/*," + s.supported_extensions.join(",");
+    }
     $("#token-state").textContent = s.config.has_hf_token
       ? "✓ A token is saved." : "No token saved yet.";
     if (document.activeElement !== $("#max-jobs")) $("#max-jobs").value = s.config.max_jobs;
@@ -71,6 +76,13 @@ async function errorText(resp) {
   return err.detail || resp.statusText || "request failed";
 }
 
+/* POST a JSON body; returns the Response (check .ok) */
+function postJSON(url, body) {
+  return fetch(url, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+}
+
 const store = {
   get(k) { try { return localStorage.getItem("sst." + k); } catch { return null; } },
   set(k, v) { try { localStorage.setItem("sst." + k, v); } catch { /* private mode */ } },
@@ -103,16 +115,19 @@ fileInput.addEventListener("change", () => {
   dropzone.addEventListener(ev, (e) => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
 dropzone.addEventListener("drop", (e) => addFiles(e.dataTransfer.files));
 
-const MEDIA_EXT = /\.(wav|mp3|m4a|aac|flac|ogg|opus|wma|mp4|mov|webm|mkv|aiff?|caf|amr|3gp)$/i;
+// filled from /api/status (the server's own list); until then accept anything
+// and let the server reject what it can't read
+let supportedExt = null;
+const extOf = (name) => (name.match(/\.[^.]+$/) || [""])[0].toLowerCase();
 
 function addFiles(list) {
   for (const file of list) {
-    if (!MEDIA_EXT.test(file.name)) {
+    if (supportedExt && !supportedExt.has(extOf(file.name))) {
       toast(`"${file.name}" is not an audio/video file this app can read.`, "err");
       continue;
     }
     if (staged.some((s) => s.file.name === file.name && s.file.size === file.size)) continue;
-    const item = { file, duration: null };
+    const item = { file, duration: null, estimate: null };
     staged.push(item);
     probeDuration(item);
   }
@@ -125,7 +140,7 @@ function probeDuration(item) {
   const media = document.createElement(item.file.type.startsWith("video") ? "video" : "audio");
   media.preload = "metadata";
   media.onloadedmetadata = () => {
-    if (isFinite(media.duration)) { item.duration = media.duration; renderStaged(); }
+    if (isFinite(media.duration)) { item.duration = media.duration; updateEstimate(); }
     URL.revokeObjectURL(url);
   };
   media.onerror = () => URL.revokeObjectURL(url);
@@ -140,10 +155,11 @@ function renderStaged() {
     row.className = "staged-row";
     row.innerHTML = `<span class="staged-icon">🎧</span>
       <span class="staged-info"><span class="staged-name"></span>
-        <span class="staged-sub">${fmtBytes(item.file.size)}${item.duration ? " · " + fmtDur(item.duration) : ""}</span></span>
+        <span class="staged-sub">${fmtBytes(item.file.size)}${item.duration ? " · " + fmtDur(item.duration) : ""}${
+          item.estimate ? ` · <b>takes about ${fmtDur(item.estimate)}</b>` : ""}</span></span>
       <button class="icon-btn" title="Remove this file" aria-label="Remove">✕</button>`;
     row.querySelector(".staged-name").textContent = item.file.name;
-    row.querySelector("button").addEventListener("click", () => { staged.splice(i, 1); renderStaged(); });
+    row.querySelector("button").addEventListener("click", () => { staged.splice(i, 1); updateEstimate(); });
     box.appendChild(row);
   });
   dropzone.classList.toggle("compact", staged.length > 0);
@@ -152,11 +168,47 @@ function renderStaged() {
   btn.disabled = !staged.length || uploading;
   btn.textContent = staged.length > 1 ? `Start transcribing ${staged.length} files` : "Start transcribing";
   $("#start-hint").textContent = uploading ? "Uploading…"
-    : staged.length ? "Check the settings, then start." : "Choose a file first.";
+    : staged.length ? estimateText() : "Choose a file first.";
+}
+
+/* ---------- time estimate before starting ----------
+   The server learns its own speed from finished jobs (per model + device), so
+   this gets accurate after a job or two. Upload time is not included. */
+let queueSeconds = 0;
+let estimateIsRough = false;
+
+async function updateEstimate() {
+  const diarize = $("#opt-diarize").checked;
+  for (const item of staged) {
+    if (!item.duration) continue;
+    const r = await fetch(`/api/estimate?seconds=${item.duration}&diarize=${diarize}`).catch(() => null);
+    if (!r || !r.ok) continue;
+    const est = await r.json();
+    item.estimate = est.seconds;
+    queueSeconds = est.queue_seconds;
+    estimateIsRough = !est.learned;
+  }
+  renderStaged();
+}
+
+function estimateText() {
+  const known = staged.filter((i) => i.estimate);
+  if (!known.length) return "Check the settings, then start.";
+  const own = known.reduce((sum, i) => sum + i.estimate, 0);
+  let text = `Estimated time: about ${fmtDur(own)}`;
+  if (known.length < staged.length) text += " (for the files with a known length)";
+  if (queueSeconds > 1) text += `, after ~${fmtDur(queueSeconds)} for jobs already running`;
+  if (estimateIsRough) text += " — rough guess until this server has finished a job";
+  return text + ".";
+}
+
+/* speaker-count lists: "Auto-detect" is in the HTML, 1–10 added here */
+for (const sel of [$("#opt-speakers"), $("#rediarize-count")]) {
+  for (let n = 1; n <= 10; n++) sel.add(new Option(String(n), String(n)));
 }
 
 /* remember the last-used settings on this browser */
-for (const id of ["opt-language", "opt-speakers"]) {
+for (const id of ["opt-language", "opt-speakers", "opt-script"]) {
   const saved = store.get(id);
   if (saved !== null && [...$("#" + id).options].some((o) => o.value === saved)) $("#" + id).value = saved;
   $("#" + id).addEventListener("change", (e) => store.set(id, e.target.value));
@@ -165,6 +217,7 @@ if (store.get("opt-diarize") !== null) $("#opt-diarize").checked = store.get("op
 $("#opt-diarize").addEventListener("change", (e) => {
   store.set("opt-diarize", e.target.checked ? "1" : "0");
   $("#opt-speakers").disabled = !e.target.checked;
+  updateEstimate();
 });
 $("#opt-speakers").disabled = !$("#opt-diarize").checked;
 
@@ -182,6 +235,7 @@ async function startTranscribing() {
     language: $("#opt-language").value,
     diarize: $("#opt-diarize").checked,
     speakers: $("#opt-speakers").value,
+    script: $("#opt-script").value,
   };
   // Upload everything first (the server queues the jobs and runs them one
   // by one), then follow whichever job is running.
@@ -196,8 +250,7 @@ async function startTranscribing() {
   uploading = false;
   uploadXhr = null;
   renderStaged();
-  await refreshJobs();
-  followActiveJob();
+  refreshJobs();
 }
 
 function uploadFile(file, opts) {
@@ -206,6 +259,7 @@ function uploadFile(file, opts) {
   fd.append("language", opts.language);
   fd.append("diarize", opts.diarize);
   if (opts.diarize && opts.speakers) fd.append("num_speakers", opts.speakers);
+  if (opts.script) fd.append("chinese_script", opts.script);
 
   showProgressCard(file.name);
   setProgress({ status: "uploading", stage: "uploading", progress: 0 });
@@ -247,9 +301,12 @@ function showProgressCard(name) {
   $("#progress-card").classList.remove("hidden");
   $("#progress-file").textContent = name;
   $("#progress-file").title = name;
-  const btn = $("#cancel-job");
-  btn.disabled = false;
-  btn.textContent = "Cancel";
+  setCancelBusy(false);
+}
+
+function setCancelBusy(busy) {
+  $("#cancel-job").disabled = busy;
+  $("#cancel-job").textContent = busy ? "Cancelling…" : "Cancel";
 }
 
 function hideProgressCard() {
@@ -264,14 +321,13 @@ $("#cancel-job").addEventListener("click", async () => {
 
 async function cancelJob(jobId) {
   if (jobId === watchingJobId) {
-    $("#cancel-job").disabled = true;
-    $("#cancel-job").textContent = "Cancelling…";
-    $("#progress-stage").textContent = "cancelling";
+    setCancelBusy(true);
+    $("#progress-stage").textContent = STAGE_LABEL.cancelling;
   }
   const resp = await fetch(`/api/jobs/${jobId}/cancel`, { method: "POST" });
   if (!resp.ok) {
     toast("Could not cancel: " + await errorText(resp), "err");
-    if (jobId === watchingJobId) { $("#cancel-job").disabled = false; $("#cancel-job").textContent = "Cancel"; }
+    if (jobId === watchingJobId) setCancelBusy(false);
   }
   refreshJobs();
 }
@@ -290,7 +346,7 @@ function watchJob(jobId) {
     $("#progress-file").textContent = job.filename;
     $("#progress-file").title = job.filename;
     setProgress(job);
-    if (!["done", "error", "cancelled"].includes(job.status)) return;
+    if (isActive(job)) return;
     es.close();
     watchSource = null;
     watchingJobId = null;
@@ -304,7 +360,7 @@ function watchJob(jobId) {
     } else {
       toast(`"${job.filename}" was cancelled.`);
     }
-    refreshJobs().then(followActiveJob);
+    refreshJobs();
     refreshStatus();
   };
   es.onerror = () => {
@@ -324,7 +380,8 @@ function watchJob(jobId) {
    browser started it, next file in a batch…). */
 function followActiveJob() {
   if (watchingJobId || uploading) return;
-  const active = lastJobs.find((j) => j.status === "running") || [...lastJobs].reverse().find((j) => j.status === "queued");
+  // running first, else the oldest queued (lastJobs is newest first)
+  const active = lastJobs.find((j) => j.status === "running") || lastJobs.findLast((j) => j.status === "queued");
   if (active) watchJob(active.id);
 }
 
@@ -350,19 +407,16 @@ function setProgress(job) {
   let detail = job.detail || "";
   if (job.stage === "transcribing" && job.chunks_total) detail = `part ${job.chunks_done} of ${job.chunks_total}`;
   if (job.stage === "queued") {
-    const ahead = lastJobs.filter((j) => (j.status === "running" || j.status === "queued") && j.created_at < job.created_at).length;
+    const ahead = job.queue_position || 0;
     detail = ahead ? `${ahead} job${ahead > 1 ? "s" : ""} ahead` : "starting soon";
   }
   $("#progress-detail").textContent = detail;
   $("#progress-eta").textContent =
-    job.eta_seconds != null && job.status === "running" && job.stage === "transcribing"
+    job.eta_seconds != null && job.status === "running" && !job.cancel_requested
       ? "~" + fmtDur(job.eta_seconds) + " left" : "";
   $("#progress-elapsed").textContent =
     job.elapsed_seconds ? "elapsed " + fmtDur(job.elapsed_seconds) : "";
-  if (job.cancel_requested) {
-    $("#cancel-job").disabled = true;
-    $("#cancel-job").textContent = "Cancelling…";
-  }
+  if (job.cancel_requested) setCancelBusy(true);
 }
 
 /* ================= RESULT: karaoke player + editor ================= */
@@ -615,10 +669,8 @@ function commitEdit(rerender = true) {
   const sel = $("#segments .seg-toolbar select");
   const idx = current.editingIdx;
   const seg = current.result.segments[idx];
-  if (ta && ta.value.trim() !== seg.text) {
-    seg.text = ta.value.trim();
-    delete seg.words;  // word timings no longer match the text
-  }
+  // stale word timings are dropped by the server when the text changed
+  if (ta) seg.text = ta.value.trim();
   if (sel && sel.value !== "__new__") seg.speaker = sel.value || null;  // "" = unassigned
   if (!seg.text) current.result.segments.splice(idx, 1);  // saving an empty line deletes it
   current.editingIdx = null;
@@ -715,12 +767,6 @@ function splitLine(idx, ta) {
   const frac = Math.min(0.95, Math.max(0.05, pos / ta.value.length));
   const mid = seg.start + (seg.end - seg.start) * frac;
   const rightSeg = { start: Math.round(mid * 1000) / 1000, end: seg.end, speaker: seg.speaker, text: right };
-  if (ta.value.trim() === seg.text && seg.words) {
-    rightSeg.words = seg.words.filter((w) => w.start >= rightSeg.start);
-    seg.words = seg.words.filter((w) => w.start < rightSeg.start);
-  } else {
-    delete seg.words;
-  }
   seg.text = left;
   seg.end = rightSeg.start;
   current.result.segments.splice(idx + 1, 0, rightSeg);
@@ -734,8 +780,7 @@ function mergeUp(idx, currentText) {
   if (idx <= 0) return;
   const prev = current.result.segments[idx - 1];
   const seg = current.result.segments[idx];
-  if (prev.words && seg.words && currentText.trim() === seg.text) prev.words = prev.words.concat(seg.words);
-  else delete prev.words;
+  if (prev.words && seg.words) prev.words = prev.words.concat(seg.words);  // server drops them if they no longer match
   prev.text = joinTexts(prev.text, currentText);
   prev.end = Math.max(prev.end, seg.end);
   current.result.segments.splice(idx, 1);
@@ -776,13 +821,27 @@ async function saveResult() {
     }),
   });
   if (resp.ok) {
-    const data = await resp.json();
-    current.result = data.result;
+    const { speakers, text, edited, speaker_colors } = await resp.json();
+    Object.assign(current.result, { speakers, text, edited, speaker_colors });
     renderResultMeta();
   } else {
     toast("Could not save edit: " + await errorText(resp), "err");
   }
 }
+
+/* ---------- convert Simplified <-> Traditional ---------- */
+$("#convert-script").addEventListener("change", async (e) => {
+  const target = e.target.value;
+  e.target.value = "";
+  if (!target || !current.jobId) return;
+  commitEdit(false);
+  const resp = await postJSON(`/api/jobs/${current.jobId}/convert`, { script: target });
+  if (!resp.ok) { toast("Could not convert: " + await errorText(resp), "err"); return; }
+  const { result } = await resp.json();
+  showResult({ ...lastJobs.find((j) => j.id === current.jobId), id: current.jobId,
+               filename: current.filename, result });
+  toast("Converted. Exports now use the converted text.", "ok");
+});
 
 /* ---------- re-detect speakers ---------- */
 $("#rediarize-open").addEventListener("click", () => {
@@ -802,16 +861,12 @@ $("#rediarize-go").addEventListener("click", async () => {
   const btn = $("#rediarize-go");
   btn.disabled = true;
   const count = $("#rediarize-count").value;
-  const resp = await fetch(`/api/jobs/${current.jobId}/rediarize`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ num_speakers: count ? Number(count) : null }),
-  });
+  const resp = await postJSON(`/api/jobs/${current.jobId}/rediarize`, { num_speakers: count ? Number(count) : null });
   btn.disabled = false;
   if (!resp.ok) { toast("Could not start: " + await errorText(resp), "err"); return; }
   $("#rediarize-panel").classList.add("hidden");
   toast("Re-detecting speakers — the new transcript will open when it is ready.");
-  await refreshJobs();
-  followActiveJob();
+  refreshJobs();
 });
 
 function escapeHtml(s) {
@@ -850,16 +905,17 @@ async function refreshJobs() {
   const resp = await fetch("/api/jobs").catch(() => null);
   if (!resp || !resp.ok) return;
   lastJobs = (await resp.json()).jobs;
+  followActiveJob();
   const list = $("#job-list");
   list.innerHTML = "";
   if (!lastJobs.length) { list.innerHTML = '<div class="empty">No jobs yet — finished transcripts appear here.</div>'; return; }
   for (const job of lastJobs) {
-    const active = job.status === "running" || job.status === "queued";
+    const active = isActive(job);
     const row = document.createElement("div");
     row.className = "job-row" + (job.id === current.jobId ? " selected" : "");
     row.dataset.id = job.id;
     row.tabIndex = 0;
-    const statusText = job.cancel_requested && active ? "cancelling" : job.status;
+    const statusText = job.stage === "cancelling" ? "cancelling" : job.status;
     row.innerHTML = `
       <div class="job-main">
         <div class="job-name"></div>
@@ -892,7 +948,7 @@ async function refreshJobs() {
 }
 
 async function openJob(job) {
-  if (job.status === "running" || job.status === "queued") { watchJob(job.id); return; }
+  if (isActive(job)) { watchJob(job.id); return; }
   if (job.status === "error") { toast("This job failed: " + job.error, "err"); return; }
   if (job.status === "cancelled") { toast("This job was cancelled — there is no transcript."); return; }
   const resp = await fetch(`/api/jobs/${job.id}`);
@@ -945,10 +1001,7 @@ function syncSearchRows(sttEntries) {
       cell.innerHTML = `<button class="btn primary" data-dl-repo="${m.repo_id}">Download</button>`;
       cell.querySelector("[data-dl-repo]").addEventListener("click", async (e) => {
         e.target.disabled = true; e.target.textContent = "Starting…";
-        await fetch("/api/models/download", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repo_id: m.repo_id }),
-        });
+        await postJSON("/api/models/download", { repo_id: m.repo_id });
         refreshModels();
       });
     } else if (m.download && m.download.status === "error") {
@@ -956,10 +1009,7 @@ function syncSearchRows(sttEntries) {
                         <button class="btn" data-dl-repo="${m.repo_id}">Retry</button>`;
       cell.querySelector("[data-dl-repo]").addEventListener("click", async (e) => {
         e.target.disabled = true;
-        await fetch("/api/models/download", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ repo_id: m.repo_id }),
-        });
+        await postJSON("/api/models/download", { repo_id: m.repo_id });
         refreshModels();
       });
     } else if (m.downloaded) {
@@ -1041,14 +1091,8 @@ function renderCatalog(container, entries) {
   container.querySelectorAll("[data-dl-repo]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       btn.disabled = true;
-      const resp = await fetch("/api/models/download", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_id: btn.dataset.dlRepo }),
-      });
-      if (!resp.ok) {
-        const err = await resp.json().catch(() => ({}));
-        alert(err.detail || "Download failed to start");
-      }
+      const resp = await postJSON("/api/models/download", { repo_id: btn.dataset.dlRepo });
+      if (!resp.ok) toast(await errorText(resp), "err");
       refreshModels();
     });
   });
@@ -1062,35 +1106,23 @@ function renderCatalog(container, entries) {
 
 async function cancelDownload(repoId) {
   if (!confirm(`Cancel downloading "${repoId}"? Partially downloaded files will be removed.`)) return;
-  await fetch("/api/models/download/cancel", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo_id: repoId }),
-  });
+  await postJSON("/api/models/download/cancel", { repo_id: repoId });
   refreshModels();
 }
 
 async function removeModel(repoId) {
   if (!confirm(`Remove "${repoId}" from local storage? You can re-download it later.`)) return;
-  const resp = await fetch("/api/models/remove", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo_id: repoId }),
-  });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    alert("Could not remove: " + (err.detail || resp.statusText));
-  }
+  const resp = await postJSON("/api/models/remove", { repo_id: repoId });
+  if (!resp.ok) toast("Could not remove: " + await errorText(resp), "err");
   refreshModels();
 }
 
 $("#apply-models").addEventListener("click", async () => {
   const stt = $("#sel-stt").value, diar = $("#sel-diar").value;
-  if (!stt) { alert("Download an STT model first."); return; }
+  if (!stt) { toast("Download a speech-to-text model first.", "err"); return; }
   const body = { stt_model: stt, load_now: true };
   if (diar) body.diarization_model = diar;
-  await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  await postJSON("/api/config", body);
   $("#apply-models").textContent = "Loading…";
   setTimeout(() => { $("#apply-models").textContent = "Apply & load"; refreshModels(); refreshStatus(); }, 3000);
 });
@@ -1124,10 +1156,7 @@ async function hfSearch() {
     const btn = row.querySelector("[data-dl-repo]");
     if (btn) btn.addEventListener("click", async () => {
       btn.disabled = true; btn.textContent = "Starting…";
-      await fetch("/api/models/download", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ repo_id: m.repo_id }),
-      });
+      await postJSON("/api/models/download", { repo_id: m.repo_id });
       refreshModels();  // the models poll now drives live progress in this row
     });
     const rm = row.querySelector("[data-rm-repo]");
@@ -1140,28 +1169,19 @@ $("#hf-query").addEventListener("keydown", (e) => { if (e.key === "Enter") hfSea
 
 /* ---------------- settings ---------------- */
 $("#save-token").addEventListener("click", async () => {
-  await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ hf_token: $("#hf-token").value.trim(), load_now: false }),
-  });
+  await postJSON("/api/config", { hf_token: $("#hf-token").value.trim(), load_now: false });
   $("#hf-token").value = "";
   $("#token-state").textContent = "✓ Token saved.";
   refreshStatus();
 });
 $("#save-device").addEventListener("click", async () => {
-  await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ device_override: $("#sel-device").value, load_now: false }),
-  });
-  alert("Saved. Device changes apply the next time models load (restart the server to force).");
+  await postJSON("/api/config", { device_override: $("#sel-device").value, load_now: false });
+  toast("Saved. Device changes apply the next time models load (restart the server to force).", "ok");
 });
 $("#save-max-jobs").addEventListener("click", async () => {
   const v = parseInt($("#max-jobs").value, 10);
-  const resp = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ max_jobs: v, load_now: false }),
-  });
-  if (!resp.ok) alert("Value must be between 3 and 20.");
+  const resp = await postJSON("/api/config", { max_jobs: v, load_now: false });
+  if (!resp.ok) toast(await errorText(resp), "err");
   else { $("#save-max-jobs").textContent = "Saved ✓"; setTimeout(() => $("#save-max-jobs").textContent = "Save", 1500); }
   refreshJobs();
 });
@@ -1179,7 +1199,7 @@ $("#key-reveal").addEventListener("click", async () => {
 });
 $("#key-regen").addEventListener("click", async () => {
   const resp = await fetch("/api/config/regenerate-key", { method: "POST" });
-  if (!resp.ok) { alert("Could not generate a key."); return; }
+  if (!resp.ok) { toast("Could not generate a key.", "err"); return; }
   const data = await resp.json();
   const input = $("#api-key");
   input.type = "text";
@@ -1188,32 +1208,24 @@ $("#key-regen").addEventListener("click", async () => {
 });
 $("#key-copy").addEventListener("click", async () => {
   const input = $("#api-key");
-  if (!input.value) { alert("Nothing to copy — reveal or regenerate a key first."); return; }
+  if (!input.value) { toast("Nothing to copy — reveal or regenerate a key first.", "err"); return; }
   await navigator.clipboard.writeText(input.value);
 });
 $("#save-key").addEventListener("click", async () => {
   const value = $("#api-key").value;
   if (!value) { refreshStatus(); return; }  // blank = keep existing key
-  const resp = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ api_key: value, load_now: false }),
-  });
+  const resp = await postJSON("/api/config", { api_key: value, load_now: false });
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    alert(err.detail || "Could not save key.");
+    toast(await errorText(resp), "err");
     return;
   }
   refreshStatus();
 });
 $("#auth-enabled").addEventListener("change", async (e) => {
   const want = e.target.checked;
-  const resp = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ auth_enabled: want, load_now: false }),
-  });
+  const resp = await postJSON("/api/config", { auth_enabled: want, load_now: false });
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    alert(err.detail || "Could not update.");
+    toast(await errorText(resp), "err");
     e.target.checked = !want;
     return;
   }
@@ -1223,13 +1235,9 @@ $("#auth-enabled").addEventListener("change", async (e) => {
 /* ---------------- server port ---------------- */
 $("#save-port").addEventListener("click", async () => {
   const p = parseInt($("#srv-port").value, 10);
-  const resp = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ port: p, load_now: false }),
-  });
+  const resp = await postJSON("/api/config", { port: p, load_now: false });
   if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    alert(err.detail || "Could not change port.");
+    toast(await errorText(resp), "err");
     return;
   }
   const data = await resp.json();
@@ -1293,15 +1301,19 @@ async function refreshNetwork() {
 }
 
 /* ---------------- dashboard: server log ---------------- */
+let lastLogCount = -1;
+
 async function refreshLogs() {
   const resp = await fetch("/api/logs?lines=300").catch(() => null);
   if (!resp || !resp.ok) return;
   const data = await resp.json();
+  if (document.activeElement !== $("#log-mode")) $("#log-mode").value = data.access_log;
+  if (data.count === lastLogCount) return;  // nothing new
+  lastLogCount = data.count;
   const view = $("#log-view");
   const atBottom = view.scrollTop + view.clientHeight >= view.scrollHeight - 20;
   view.textContent = data.lines.length ? data.lines.join("\n") : "(empty)";
   if (atBottom) view.scrollTop = view.scrollHeight;
-  if (document.activeElement !== $("#log-mode")) $("#log-mode").value = data.access_log;
   $("#log-file-hint").textContent =
     `Full log file on the server: ${data.file} (rotates at 5 MB, keeps 3 old files).`;
 }
@@ -1309,14 +1321,12 @@ $("#log-refresh").addEventListener("click", refreshLogs);
 $("#log-download").addEventListener("click", () => window.open("/api/logs/download", "_blank"));
 $("#log-clear").addEventListener("click", async () => {
   if (!confirm("Clear the log? The current log file is moved to sst.log.1.")) return;
-  await fetch("/api/logs/clear", { method: "POST" });
+  const resp = await fetch("/api/logs/clear", { method: "POST" });
+  if (!resp.ok) toast("Could not clear: " + await errorText(resp), "err");
   refreshLogs();
 });
 $("#log-mode").addEventListener("change", async (e) => {
-  const resp = await fetch("/api/config", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ access_log: e.target.value, load_now: false }),
-  });
+  const resp = await postJSON("/api/config", { access_log: e.target.value, load_now: false });
   if (!resp.ok) toast(await errorText(resp), "err");
   else toast("Log setting saved.", "ok");
 });
@@ -1329,12 +1339,12 @@ function activeTab() { return $(".nav-item.active").dataset.tab; }
 function poll() {
   if (document.hidden) return;
   refreshStatus();
-  refreshJobs().then(followActiveJob);
+  refreshJobs();
   if (activeTab() === "dashboard") refreshLogs();
 }
 
 refreshStatus();
-refreshJobs().then(followActiveJob);
+refreshJobs();
 refreshModels();
 refreshNetwork();
 setInterval(poll, 10000);

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 class CatalogEntry:
     repo_id: str
     kind: str                    # "stt" | "diarization"
-    engine: str                  # "whisper" | "sensevoice" | "pyannote" | "builtin"
+    engine: str                  # "whisper" | "qwen3asr" | "sensevoice" | "pyannote" | "builtin"
     display_name: str
     languages: str
     size: str
@@ -19,6 +19,8 @@ class CatalogEntry:
     word_timestamps: bool = False
     requires_extra: str = ""     # optional uv extra needed
     tags: list[str] = field(default_factory=list)
+    # helper repos downloaded (and removed) together with this one
+    extra_repos: list[str] = field(default_factory=list)
 
 
 STT_CATALOG: list[CatalogEntry] = [
@@ -43,6 +45,34 @@ STT_CATALOG: list[CatalogEntry] = [
         license="Apache-2.0 — commercial use allowed",
         word_timestamps=True,
         tags=["fast", "multilingual"],
+    ),
+    CatalogEntry(
+        repo_id="Qwen/Qwen3-ASR-1.7B",
+        kind="stt", engine="qwen3asr",
+        display_name="Qwen3-ASR 1.7B",
+        languages="30 languages + 22 Chinese dialects incl. Cantonese, Mandarin, English",
+        size="~6.5 GB",
+        strengths="Much better Cantonese and Mandarin than Whisper (published Cantonese error "
+                  "rate 7.6 % vs 16.2 % for Whisper large-v3; English about equal). Word "
+                  "timestamps come from Qwen3-ForcedAligner, downloaded with it. Needs ~8 GB of "
+                  "free memory.",
+        license="Apache-2.0 — commercial use allowed",
+        word_timestamps=True,
+        tags=["cantonese", "multilingual"],
+        extra_repos=["Qwen/Qwen3-ForcedAligner-0.6B"],
+    ),
+    CatalogEntry(
+        repo_id="Qwen/Qwen3-ASR-0.6B",
+        kind="stt", engine="qwen3asr",
+        display_name="Qwen3-ASR 0.6B",
+        languages="30 languages + 22 Chinese dialects incl. Cantonese, Mandarin, English",
+        size="~3.7 GB",
+        strengths="Smaller, faster Qwen3-ASR for machines with less memory; still strong on "
+                  "Cantonese. Word timestamps via Qwen3-ForcedAligner (downloaded with it).",
+        license="Apache-2.0 — commercial use allowed",
+        word_timestamps=True,
+        tags=["cantonese", "light"],
+        extra_repos=["Qwen/Qwen3-ForcedAligner-0.6B"],
     ),
     CatalogEntry(
         repo_id="openai/whisper-medium",
@@ -120,8 +150,29 @@ DIARIZATION_CATALOG: list[CatalogEntry] = [
 
 CATALOG: list[CatalogEntry] = STT_CATALOG + DIARIZATION_CATALOG
 
+# Language codes (as used in the API) -> Qwen3-ASR's language names.
+QWEN3_ASR_LANGUAGES = {
+    "zh": "Chinese", "en": "English", "yue": "Cantonese", "ar": "Arabic", "de": "German",
+    "fr": "French", "es": "Spanish", "pt": "Portuguese", "id": "Indonesian", "it": "Italian",
+    "ko": "Korean", "ru": "Russian", "th": "Thai", "vi": "Vietnamese", "ja": "Japanese",
+    "tr": "Turkish", "hi": "Hindi", "ms": "Malay", "nl": "Dutch", "sv": "Swedish",
+    "da": "Danish", "fi": "Finnish", "pl": "Polish", "cs": "Czech", "fil": "Filipino",
+    "fa": "Persian", "el": "Greek", "ro": "Romanian", "hu": "Hungarian", "mk": "Macedonian",
+}
+
 # Repos the builtin diarizer needs downloaded.
 BUILTIN_DIARIZATION_DEPS = ["speechbrain/spkrec-ecapa-voxceleb"]
+
+
+def repo_targets(repo_id: str) -> list[str]:
+    """Every Hugging Face repo that makes up `repo_id` (itself + helper repos)."""
+    if repo_id == "builtin/vad-ecapa-clustering":
+        return list(BUILTIN_DIARIZATION_DEPS)
+    entry = find_entry(repo_id)
+    return [repo_id, *(entry.extra_repos if entry else [])]
+
+
+HELPER_REPOS = {r for e in CATALOG for r in e.extra_repos} | set(BUILTIN_DIARIZATION_DEPS)
 
 
 def find_entry(repo_id: str) -> CatalogEntry | None:
@@ -153,8 +204,10 @@ def classify_hf_model(repo_id: str, hf_tags: list[str], library: str | None = No
         return None
     if tagset & set(_FOREIGN_FORMAT_MARKERS):
         return None
-    if library and library.lower() not in ("transformers", "funasr"):
+    if library and library.lower() not in ("transformers", "funasr", "qwen-asr"):
         return None
+    if "qwen3-asr" in lowered:
+        return "qwen3asr"
     if "whisper" in lowered or "whisper" in tagset:
         return "whisper"
     if "sensevoice" in lowered:

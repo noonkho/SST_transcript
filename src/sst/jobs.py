@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from .audio import COMPRESSED_EXTENSIONS, transcode_for_storage
+from .audio import COMPRESSED_EXTENSIONS, probe_duration, transcode_for_storage
 from .config import DATA_DIR, config
 
 log = logging.getLogger("sst.jobs")
@@ -150,6 +150,7 @@ class JobStore:
             dest = AUDIO_DIR / f"{job.id}{suffix}"
             shutil.move(audio_src, dest)  # rename() would fail across filesystems
             job.audio_path = str(dest)
+            job.audio_duration = probe_duration(job.audio_path)  # for the queue's time estimate
         with self._lock:
             self.jobs[job.id] = job
         self.save(job)
@@ -162,15 +163,9 @@ class JobStore:
             return job
         job.cancel_requested = True
         if job.status == "queued":
-            job.status = "cancelled"
-            job.stage = "cancelled"
-            job.finished_at = time.time()
-            # the worker skips it without running, so drop its audio here
-            if job.audio_path:
-                Path(job.audio_path).unlink(missing_ok=True)
-                job.audio_path = ""
-            self.save(job)
-            self.enforce_limit()
+            # the worker will skip it, so finish it here
+            job.status = job.stage = "cancelled"
+            self._finish(job)
         return job
 
     def delete(self, job_id: str) -> bool:
@@ -185,8 +180,7 @@ class JobStore:
         with self._lock:
             self.jobs.pop(job_id, None)
         self._job_file(job_id).unlink(missing_ok=True)
-        if job.audio_path:
-            Path(job.audio_path).unlink(missing_ok=True)
+        self._drop_audio(job)
         return True
 
     def get(self, job_id: str) -> Job | None:
@@ -194,6 +188,15 @@ class JobStore:
 
     def all(self) -> list[Job]:
         return sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)
+
+    def view(self, job: Job, include_result: bool = False) -> dict:
+        """job.public() plus queue_position (jobs ahead of it) while it waits."""
+        d = job.public(include_result)
+        if job.status == "queued":
+            d["queue_position"] = sum(
+                1 for j in self.jobs.values()
+                if j.status in ("queued", "running") and j.created_at < job.created_at)
+        return d
 
     def update_result(self, job: Job, result: dict) -> None:
         job.result = result
@@ -247,19 +250,26 @@ class JobStore:
                 job.error = str(exc)[:500]
             finally:
                 ticker.set()
-                job.finished_at = time.time()
-                job.elapsed_seconds = job.finished_at - (job.started_at or job.finished_at)
-                log.info("job %s %s after %.1fs", job.id, job.status, job.elapsed_seconds)
-                if job.status == "done":
-                    self._compress_audio(job)
-                else:
-                    # No transcript to play along to — don't keep the audio.
-                    if job.audio_path:
-                        Path(job.audio_path).unlink(missing_ok=True)
-                        job.audio_path = ""
-                self.save(job)
-                self.enforce_limit()
+                self._finish(job)
                 self._release_memory()
+
+    def _finish(self, job: Job) -> None:
+        """Common end of every job, whatever its outcome."""
+        job.finished_at = time.time()
+        job.elapsed_seconds = job.finished_at - (job.started_at or job.finished_at)
+        log.info("job %s %s after %.1fs", job.id, job.status, job.elapsed_seconds)
+        if job.status == "done":
+            self._compress_audio(job)
+        else:
+            self._drop_audio(job)  # no transcript to play along to
+        self.save(job)
+        self.enforce_limit()
+
+    @staticmethod
+    def _drop_audio(job: Job) -> None:
+        if job.audio_path:
+            Path(job.audio_path).unlink(missing_ok=True)
+            job.audio_path = ""
 
     @staticmethod
     def _compress_audio(job: Job) -> None:

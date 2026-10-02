@@ -14,6 +14,8 @@ or `http://<server-address>:8756` from another computer (see
 - [Fix the transcript](#fix-the-transcript)
 - [Speakers: rename, recolour, merge](#speakers-rename-recolour-merge)
 - [Wrong number of speakers? Re-detect them](#wrong-number-of-speakers-re-detect-them)
+- [Simplified ↔ Traditional Chinese](#simplified--traditional-chinese)
+- [Whisper or Qwen3-ASR?](#whisper-or-qwen3-asr)
 - [Export (Word, subtitles, text, JSON)](#export-word-subtitles-text-json)
 - [Dashboard](#dashboard)
 - [Server log](#server-log)
@@ -40,11 +42,19 @@ each file shows its size and length, and **✕** removes it.
 | **Language** | Auto-detect, Cantonese, Mandarin or English | Auto works for most files. Pick the language if the result comes out in the wrong one (for example Cantonese written as Mandarin) |
 | **Number of speakers** | Auto-detect, or exactly 1–10 | If you *know* the number, set it — that gives the best result. If not, leave Auto |
 | **Identify speakers** | Turn speaker detection on/off | Off = plain text with no speaker names, a little faster |
+| **Chinese characters** | Keep as transcribed, or convert to Traditional (Hong Kong), Traditional (Taiwan) or Simplified | Cantonese often comes out in Simplified characters — pick **Traditional — Hong Kong** to always get 繁體 |
 
 The app remembers these settings in your browser for next time.
 
-**3. Start.** Click **Start transcribing**. Each file uploads (you see the upload
+**3. Start.** Before you click, the line next to the button shows **how long it
+will take**, for example "Estimated time: about 5m 10s, after ~2m for jobs already
+running". Click **Start transcribing**. Each file uploads (you see the upload
 percentage), then the server works on it.
+
+How the estimate works: the server measures how fast it actually is — per model
+and per machine — on every finished job, and uses that for the next estimate.
+Until it has finished a job with the chosen model, the estimate is a rough guess
+(it says so). Upload time is not included.
 
 ## Watch progress, cancel, queue
 
@@ -57,12 +67,15 @@ The progress card shows what is happening:
 | Loading models | First job after a start or a model change |
 | Reading audio | Converting the file |
 | Finding speakers | Speaker detection (diarization) |
-| Transcribing — part 12 of 74 | Speech-to-text, with time left |
+| Transcribing — part 12 of 74 | Speech-to-text |
 | Finishing | Putting it all together |
 
 **Cancel** stops the job within 1–3 seconds — during upload, speaker finding and
 transcribing. Only *Loading models* (first job after a start, up to a minute)
 finishes before the cancel applies. A cancelled job keeps no audio.
+
+Every stage shows the **time left** ("~3m 20s left"), based on the same
+measured speed.
 
 The server transcribes **one file at a time**; other files wait in the queue.
 You can close the browser — the job keeps running on the server. When you come
@@ -77,6 +90,8 @@ was started. Click a finished row to open its transcript.
 
 - **🗑** deletes a job (transcript and audio, for good).
 - **■** cancels a running or waiting job.
+- Long names show on two lines. Hover over a row to see the full name, or open
+  the job: the open job (highlighted) always shows its full name.
 - Only the last **5** jobs are kept (change it in *Settings → Job history*,
   3–20). The oldest ones are deleted automatically — download anything you want
   to keep.
@@ -137,6 +152,37 @@ What happens:
 
 Do you need to transcribe again from scratch? Only if the **words** are wrong
 (wrong language, wrong model). For speaker problems, Re-detect is enough.
+
+## Simplified ↔ Traditional Chinese
+
+Whisper often writes Cantonese in Simplified characters (欢迎, 会). Two ways to fix it:
+
+- **Before transcribing:** set *Chinese characters* to **Traditional — Hong Kong**
+  (or Taiwan, or Simplified). Every new transcript is converted automatically.
+- **After transcribing:** open the transcript and use the **Characters → Convert to…**
+  menu above it. The change is saved, and all exports use it.
+
+The conversion uses [OpenCC](https://github.com/BYVoid/OpenCC), which converts by
+phrase, not letter by letter: 头发 → 頭髮 but 发展 → 發展. The Hong Kong option uses
+Hong Kong forms (软件 → 軟件); the Taiwan option also uses Taiwan words
+(软件 → 軟體). Cantonese characters such as 我哋, 嘅 and 喺 are left as they are.
+
+## Whisper or Qwen3-ASR?
+
+Both are speech-to-text models; you choose in **Models**.
+
+| | Whisper large-v3 | Qwen3-ASR 1.7B / 0.6B |
+|---|---|---|
+| Cantonese accuracy | Good; often writes standard Chinese instead of spoken Cantonese | **Much better** (published error rate about half of Whisper's); keeps 我哋 / 嘅 / 喺 |
+| Mandarin / English | Very good | Mandarin better, English about the same |
+| Word timings (karaoke, speaker split) | Yes | Yes (via the Qwen3-ForcedAligner, downloaded with it) |
+| Download | 3.1 GB | 6.5 GB (1.7B) or 3.7 GB (0.6B) |
+| Memory needed | ~6 GB | ~8 GB (1.7B) or ~4 GB (0.6B) |
+| License | Apache-2.0 | Apache-2.0 |
+
+To switch: **Models → Speech-to-text models → Download** next to Qwen3-ASR, wait
+for it, then pick it under **Active models** and click **Apply & load**. Switch
+back to Whisper the same way. Both can stay downloaded.
 
 ## Export (Word, subtitles, text, JSON)
 
@@ -228,9 +274,19 @@ or fix single lines with the speaker list in edit mode.
 
 **One person got two labels.** Rename one label to the other's name to merge.
 
-**Cantonese comes out as written Chinese / Mandarin.** Set Language to
-Cantonese. Whisper tends to write standard Chinese; see [MODELS.md](MODELS.md)
-for Cantonese-focused options.
+**Cantonese comes out in Simplified characters.** Set *Chinese characters* to
+Traditional — Hong Kong, or use *Convert to…* on the transcript.
+
+**Cantonese comes out as written standard Chinese instead of spoken Cantonese.**
+Set Language to Cantonese, or switch to Qwen3-ASR (see above).
+
+**Model downloads are slow.** Downloads come from Hugging Face, the official home
+of these models, with its fast multi-connection downloader. In a speed test,
+ModelScope (Alibaba's official mirror, which also hosts Qwen) was no faster than
+Hugging Face, because the internet connection was the limit. A download that
+stops resumes when you click Download again. To save time on a second machine,
+copy the downloaded models instead (see [MODELS.md](MODELS.md#offline--air-gapped-use)).
+Avoid unofficial "mirror" sites — they are not run by the model authors.
 
 **Where are my files stored?** In the project's `data/` folder on the server:
 `data/audio` (audio), `data/jobs` (transcripts), `data/logs` (logs),

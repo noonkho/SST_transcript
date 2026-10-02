@@ -7,6 +7,7 @@ import time
 
 import numpy as np
 
+from . import script, speed
 from .audio import decode_audio, duration_seconds
 from .config import config
 from .diarize.base import SpeakerTurn
@@ -19,6 +20,8 @@ log = logging.getLogger("sst.pipeline")
 
 # Stage weights for the overall progress bar.
 W_LOAD, W_DECODE, W_DIAR, W_STT = 0.05, 0.05, 0.15, 0.73
+# Re-detecting speakers has no STT stage, so diarization gets most of the bar.
+RD_DECODE, RD_DIAR = 0.2, 0.75
 
 
 def run_transcription(job: Job, audio_path: str) -> dict:
@@ -54,7 +57,7 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     if diarize:
         wanted = diar_model or config.diarization_model
         try:
-            manager.ensure_loaded(stt_repo=stt_model, diar_repo=diar_model, load_diar=True)
+            manager.ensure_loaded(stt_repo=stt_model, diar_repo=diar_model)
             diar_engine = manager.diar_engine
             diar_repo_used = manager.diar_repo
         except Exception as exc:  # noqa: BLE001
@@ -67,44 +70,41 @@ def _run_locked(job: Job, audio_path: str) -> dict:
     job.progress = W_LOAD
     job.check_cancelled()
 
-    job.stage = "decoding"
-    audio = decode_audio(audio_path)
-    total = duration_seconds(audio)
-    job.audio_duration = total
-    job.progress = W_LOAD + W_DECODE
-    job.check_cancelled()
-
+    audio, total = _decode(job, audio_path, W_LOAD + W_DECODE)
     speech = detect_speech(audio)
     chunks = pack_chunks(audio, speech)
+    total_chunk_audio = sum(c.end - c.start for c in chunks) or 1.0
     log.info("audio %.1fs → %d speech chunks", total, len(chunks))
     job.check_cancelled()
 
+    # speed ratios are per second of *file* (what estimates before upload know)
+    stt_estimate = speed.stage_seconds("stt", stt_repo_used, total)
     turns: list[SpeakerTurn] = []
+    diar_seconds = 0.0
     if diar_engine and chunks:
-        turns, diar_repo_used = _diarize(job, diar_engine, diar_repo_used, audio, speech,
-                                         W_LOAD + W_DECODE, W_DIAR, warnings)
+        t0 = time.time()
+        found = _diarize(job, diar_engine, audio, speech, W_LOAD + W_DECODE, W_DIAR, warnings,
+                         then_seconds=stt_estimate, diar_repo=diar_repo_used)
+        diar_seconds = time.time() - t0
+        if found is None:
+            diar_repo_used = None
+        else:
+            turns = found
     job.progress = W_LOAD + W_DECODE + W_DIAR
     job.check_cancelled()
 
     job.stage = "transcribing"
+    job.eta_seconds = stt_estimate
     segments: list[SttSegment] = []
     detected_language = ""
-    chunk_times: list[float] = []
     processed_audio = 0.0
-    total_chunk_audio = sum(c.end - c.start for c in chunks) or 1.0
     job.chunks_total = len(chunks)
     job.chunks_done = 0
+    stt_started = time.time()
 
     for i, chunk in enumerate(chunks):
         job.check_cancelled()
-        t0 = time.time()
-        try:
-            chunk_segments = stt.transcribe_chunk(chunk.audio, language,
-                                                  should_stop=lambda: job.cancel_requested)
-        except Exception:
-            job.check_cancelled()  # a chunk cut short by Cancel may fail to decode
-            raise
-        for seg in chunk_segments:
+        for seg in stt.transcribe_chunk(chunk.audio, language, check_cancelled=job.check_cancelled):
             seg.start += chunk.start
             seg.end = min(seg.end + chunk.start, total)
             for w in seg.words:
@@ -112,16 +112,13 @@ def _run_locked(job: Job, audio_path: str) -> dict:
                 w.end += chunk.start
             segments.append(seg)
             detected_language = detected_language or seg.language
-        job.check_cancelled()  # a stopped chunk is partial — never keep it
-        chunk_times.append(time.time() - t0)
         processed_audio += chunk.end - chunk.start
         job.chunks_done = i + 1
 
-        frac = processed_audio / total_chunk_audio
-        job.progress = W_LOAD + W_DECODE + W_DIAR + W_STT * frac
-        if chunk_times:
-            speed = processed_audio / max(sum(chunk_times), 1e-6)  # audio-seconds per wall-second
-            job.eta_seconds = max(0.0, (total_chunk_audio - processed_audio) / max(speed, 1e-6))
+        job.progress = W_LOAD + W_DECODE + W_DIAR + W_STT * processed_audio / total_chunk_audio
+        rate = processed_audio / max(time.time() - stt_started, 1e-6)  # audio-s per wall-s
+        job.eta_seconds = max(0.0, (total_chunk_audio - processed_audio) / max(rate, 1e-6))
+    stt_seconds = time.time() - stt_started
 
     if not detected_language and segments and hasattr(stt, "detect_language") and chunks:
         detected_language = stt.detect_language(chunks[0].audio)
@@ -135,45 +132,74 @@ def _run_locked(job: Job, audio_path: str) -> dict:
          "words": _word_list(s.words, s.start, s.end, s.text)}
         for s in segments if s.text.strip()
     ]
-    speakers = sorted({s["speaker"] for s in out_segments if s["speaker"]}) or None
 
-    return {
+    speed.record("stt", stt_repo_used, stt_seconds, total)
+    speed.record("diar", diar_repo_used, diar_seconds, total)
+    result = {
         "language": detected_language or (language or ""),
         "duration": round(total, 3),
-        "text": " ".join(s["text"] for s in out_segments).strip(),
-        "segments": out_segments,
-        "speakers": speakers,
+        **_summarize(out_segments),
         "model": stt_repo_used,
         "diarization_model": diar_repo_used if turns else None,
         "warnings": warnings,
     }
+    return _apply_script(result, params)
 
 
-def _diarize(job: Job, engine, repo: str | None, audio: np.ndarray,
-             speech: list[tuple[float, float]], base: float, weight: float,
-             warnings: list[dict]) -> tuple[list[SpeakerTurn], str | None]:
-    """Run the diarizer with live progress and cancellation.
+def _decode(job: Job, audio_path: str, progress_after: float) -> tuple[np.ndarray, float]:
+    job.stage = "decoding"
+    audio = decode_audio(audio_path)
+    total = duration_seconds(audio)
+    job.audio_duration = total
+    job.progress = progress_after
+    job.check_cancelled()
+    return audio, total
+
+
+def _summarize(segments: list[dict]) -> dict:
+    """The fields derived from the segment list."""
+    return {
+        "segments": segments,
+        "speakers": sorted({s["speaker"] for s in segments if s["speaker"]}) or None,
+        "text": " ".join(s["text"] for s in segments).strip(),
+    }
+
+
+def _apply_script(result: dict, params: dict) -> dict:
+    """Convert Simplified/Traditional characters when the job asked for it."""
+    target = params.get("chinese_script")
+    return script.convert_result(result, target) if target else result
+
+
+def _diarize(job: Job, engine, audio: np.ndarray, speech: list[tuple[float, float]] | None,
+             base: float, weight: float, warnings: list[dict], *,
+             then_seconds: float, diar_repo: str | None) -> list[SpeakerTurn] | None:
+    """Run the diarizer with live progress, time-left and cancellation.
 
     `progress(frac)` is called by the engine from inside its loops; it raises
     JobCancelled when the user pressed Cancel, so a long diarization stops
     within a second instead of only after it finishes. Any other failure
-    degrades to "no speaker labels" instead of losing the transcript.
+    returns None ("no speaker labels") instead of losing the transcript.
+    `then_seconds` is the expected time of the stages after this one.
     """
     params = job.params
     job.stage = "diarizing"
+    expected = speed.stage_seconds("diar", diar_repo or "", job.audio_duration)
+    job.eta_seconds = expected + then_seconds
 
     def progress(frac: float) -> None:
-        job.progress = base + weight * min(max(frac, 0.0), 1.0)
+        frac = min(max(frac, 0.0), 1.0)
+        job.progress = base + weight * frac
+        job.eta_seconds = expected * (1 - frac) + then_seconds
         job.check_cancelled()
 
     try:
-        turns = engine.diarize(
+        return engine.diarize(
             audio, num_speakers=params.get("num_speakers") or None, speech=speech,
             min_speakers=params.get("min_speakers") or None,
             max_speakers=params.get("max_speakers") or None,
             progress=progress,
         )
-        return turns, repo
     except JobCancelled:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -181,10 +207,10 @@ def _diarize(job: Job, engine, repo: str | None, audio: np.ndarray,
         log.warning("diarization failed (%s) — returning transcript without labels", exc)
         warnings.append({
             "code": "diarization_unavailable",
-            "message": f"Diarization model {repo} failed: {exc}. Segments "
+            "message": f"Diarization model {diar_repo} failed: {exc}. Segments "
                        "processed without speaker labels. Segments[].speaker is null.",
         })
-        return [], None
+        return None
 
 
 def run_rediarization(job: Job, audio_path: str, source: dict) -> dict:
@@ -195,40 +221,35 @@ def run_rediarization(job: Job, audio_path: str, source: dict) -> dict:
     speaker turns. Used when the first run guessed the wrong number of speakers.
     """
     with manager.engines_lock:
-        params = job.params
         warnings: list[dict] = []
         job.stage = "loading models"
-        manager.ensure_loaded(diar_repo=params.get("diarization_model") or None,
-                              load_stt=False, load_diar=True)
+        manager.ensure_loaded(diar_repo=job.params.get("diarization_model") or None,
+                              load_stt=False)
         engine, repo = manager.diar_engine, manager.diar_repo
         job.progress = W_LOAD
         job.check_cancelled()
 
-        job.stage = "decoding"
-        audio = decode_audio(audio_path)
-        job.audio_duration = duration_seconds(audio)
-        job.progress = 0.15
-        job.check_cancelled()
-        speech = detect_speech(audio)
-        job.check_cancelled()
-
-        turns, repo = _diarize(job, engine, repo, audio, speech, 0.2, 0.75, warnings)
+        audio, total = _decode(job, audio_path, RD_DECODE)
+        t0 = time.time()
+        # speech=None: pyannote has its own VAD; the builtin engine runs one itself
+        turns = _diarize(job, engine, audio, None, RD_DECODE, RD_DIAR, warnings,
+                         then_seconds=0.0, diar_repo=repo)
         if not turns:
             raise RuntimeError(warnings[0]["message"] if warnings else
                                "The diarizer found no speech in this audio.")
+        speed.record("diar", repo, time.time() - t0, total)
 
         job.stage = "finalizing"
         segments = _merge_speakers(_segments_from_result(source.get("segments") or []), turns)
         result = {k: v for k, v in source.items()
                   if k not in ("segments", "speakers", "speaker_colors", "edited", "warnings")}
-        result.update({
-            "segments": segments,
-            "speakers": sorted({s["speaker"] for s in segments if s["speaker"]}) or None,
-            "text": " ".join(s["text"] for s in segments).strip(),
-            "diarization_model": repo,
-            "warnings": warnings,
-        })
+        result.update(_summarize(segments), diarization_model=repo, warnings=warnings)
         return result
+
+
+def words_match(words: list[dict], text: str) -> bool:
+    """True when a stored word list still spells the line's text (ignoring spaces)."""
+    return bool(words) and _squash("".join(str(w.get("word", "")) for w in words)) == _squash(text)
 
 
 def _segments_from_result(segments: list[dict]) -> list[SttSegment]:
@@ -245,7 +266,7 @@ def _segments_from_result(segments: list[dict]) -> list[SttSegment]:
             continue
         stored = seg.get("words") or []
         words: list[Word] = []
-        if len(stored) > 1 and _squash("".join(w.get("word", "") for w in stored)) == _squash(text):
+        if len(stored) > 1 and words_match(stored, text):
             prev = ""
             for w in stored:
                 token = str(w["word"])

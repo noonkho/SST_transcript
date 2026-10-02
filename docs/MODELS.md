@@ -4,6 +4,8 @@ Open the **Models** tab to download and switch models. Guidance:
 
 | Model | Best for | Size | Notes |
 |---|---|---|---|
+| **Qwen3-ASR 1.7B** | Best Cantonese + Mandarin, word timestamps | 6.5 GB | Includes the 1.8 GB timing aligner; needs ~8 GB free memory |
+| **Qwen3-ASR 0.6B** | Cantonese on smaller machines | 3.7 GB | Same aligner (shared — downloaded once) |
 | **Whisper large-v3** (default) | Highest accuracy, word timestamps | 3 GB | Great Mandarin/English; decent Cantonese |
 | **Whisper large-v3-turbo** | Long recordings, 4× faster | 1.6 GB | Near-equal accuracy |
 | **SenseVoice Small** | Cantonese + heavy **code-switching** | 1 GB | Very fast; segment-level timestamps only. Needs `uv sync --extra sensevoice` |
@@ -140,7 +142,7 @@ commercially safe pair. This is what else exists and whether it would help.
 
 | Model | License | Good at | Fit for SST |
 |---|---|---|---|
-| **Qwen3-ASR-1.7B** (+ Qwen3-ForcedAligner-0.6B for word times) | Apache-2.0 ✅ | 30 languages + 22 Chinese dialects. Published Cantonese error rate (Common Voice yue) **7.6 %** vs Whisper large-v3 **16.2 %**; Mandarin (AISHELL-2) 2.7 % vs 5.1 %; English about equal | **Best upgrade candidate for Cantonese.** PyTorch-based, so it fits the cross-platform design. Needs a new engine in `src/sst/stt/`; the aligner handles ≤ 5 min per call, so it must run per chunk (SST already chunks to ≤ 28 s). Not built in yet |
+| **Qwen3-ASR-1.7B** / **0.6B** (+ Qwen3-ForcedAligner-0.6B for word times) | Apache-2.0 ✅ | 30 languages + 22 Chinese dialects. Published Cantonese error rate (Common Voice yue) **7.6 %** vs Whisper large-v3 **16.2 %**; Mandarin (AISHELL-2) 2.7 % vs 5.1 %; English about equal | **Built in** — download it in the Models tab. The aligner downloads with it |
 | **Gemma 4** E2B / E4B / 12B (audio input) | Apache-2.0 ✅ | General multimodal LLM that can also transcribe | **Not a good fit.** Max 30 s of audio per request, **no timestamps** (so no karaoke, no speaker alignment), no published Cantonese accuracy. Better used *after* transcription, e.g. for summaries |
 | **oMLX 0.7.0** | — | A model *server* for Apple's MLX; this release fixed Gemma 4 audio | Apple-only runtime. SST is PyTorch so the same code runs on Mac, NVIDIA (DGX) and CPU — adopting MLX would split the code base |
 | Whisper large-v3-turbo | Apache-2.0 ✅ | ~4× faster, near-same accuracy | Already in the catalog |

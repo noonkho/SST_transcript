@@ -71,5 +71,18 @@ def transcode_for_storage(src: str, dest: str) -> bool:
     return subprocess.run(cmd, capture_output=True).returncode == 0
 
 
+def probe_duration(path: str) -> float:
+    """Length of a media file in seconds from its header (fast, no decoding); 0 if unknown."""
+    if not shutil.which("ffprobe"):
+        return 0.0
+    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+           "-of", "default=noprint_wrappers=1:nokey=1", path]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout.strip()
+        return max(0.0, float(out))
+    except (subprocess.SubprocessError, ValueError):
+        return 0.0
+
+
 def duration_seconds(audio: np.ndarray, sample_rate: int = SAMPLE_RATE) -> float:
     return float(len(audio)) / sample_rate

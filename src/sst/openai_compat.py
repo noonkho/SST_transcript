@@ -76,6 +76,9 @@ def languages_for(engine: str) -> list[str]:
         return whisper_languages()
     if engine == "sensevoice":
         return list(SENSEVOICE_LANGUAGES)
+    if engine == "qwen3asr":
+        from .registry import QWEN3_ASR_LANGUAGES
+        return sorted(QWEN3_ASR_LANGUAGES)
     return []
 
 

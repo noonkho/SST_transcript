@@ -9,13 +9,15 @@ You get a web app (drag in a file, read, play, fix, export to Word) and an
 
 | | |
 |---|---|
-| **Languages** | Cantonese, Mandarin, English (+ 96 more via Whisper), auto-detected or chosen |
+| **Languages** | Cantonese, Mandarin, English (+ many more), auto-detected or chosen |
+| **Models** | Whisper large-v3 (default) or **Qwen3-ASR** (much better Cantonese) — pick in the Models tab |
 | **Speakers** | Finds who spoke when (pyannote community-1, or a built-in no-account option). Wrong count? Re-detect in seconds |
 | **Input** | mp3, m4a, wav, flac, ogg, mp4, mov … anything ffmpeg reads; several files at once |
 | **Output** | Word (.docx, Times New Roman + PMingLiU), SRT/VTT subtitles, text, JSON with word timings |
+| **Chinese script** | Convert Simplified ↔ Traditional (Hong Kong / Taiwan) automatically or with one click |
 | **Editing** | Karaoke playback, click-to-play, inline editing, rename/merge/recolour speakers |
 | **Hardware** | Apple Silicon (MPS), NVIDIA CUDA, or plain CPU — picked automatically |
-| **Long files** | Hours-long audio, progress bar with time left, cancel any time |
+| **Long files** | Hours-long audio, time estimate before you start, progress with time left, cancel any time |
 | **Licensing** | Default models may be used commercially ([details](#model-licensing--commercial-use)) |
 
 **Documentation**
@@ -150,6 +152,8 @@ audio file ─ ffmpeg → 16 kHz mono
   start (`cuda` → `mps` → `cpu`). Works on a Mac today and a DGX box tomorrow.
 - Jobs run one at a time on a worker thread; the web app stays responsive.
   Progress and time-left come from measured speed.
+- Downloaded models load from the local disk only — no network check on start,
+  so the server starts fast and works offline.
 - **Re-detect speakers** re-runs only the diarization step and re-assigns the
   stored words, so fixing the speaker count is much faster than a new transcript.
 
@@ -188,7 +192,9 @@ every request.
 | "Model … is not downloaded yet" | Open **Models** and download it. The default model downloads by itself on the first start — wait for it |
 | Speaker model (pyannote) won't load | Save a Hugging Face token in **Settings** *and* accept the model terms on huggingface.co. Until then the built-in speaker model is used automatically |
 | Wrong number of speakers | **👥 Re-detect speakers** on the transcript, or merge two speakers by renaming one to the other's name |
-| Cantonese comes out as standard written Chinese | Set Language to Cantonese. See [MODELS.md](docs/MODELS.md) for Cantonese-focused models |
+| Cantonese comes out in Simplified characters | Set *Chinese characters* to Traditional — Hong Kong, or use *Convert to…* on the transcript |
+| Cantonese comes out as standard written Chinese | Set Language to Cantonese, or switch to Qwen3-ASR in **Models** |
+| Model downloads are slow | The connection is usually the limit — see the [user guide FAQ](docs/USER_GUIDE.md#faq). Downloads resume if stopped |
 | Very slow / out of memory | Use `whisper-large-v3-turbo` (Models tab) and close other big apps — a 16 GB Mac swaps hard with large-v3 plus a browser and an IDE |
 | Cancel says "Cancelling…" for a while | It stops at the next safe point (1–3 s normally). Only model loading can't be interrupted |
 | Other computers can't connect | Check the address on **Dashboard → Share access**, the firewall, and that both are on the same network or tailnet |

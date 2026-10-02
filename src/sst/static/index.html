@@ -59,18 +59,23 @@
           <label>Number of speakers
             <select id="opt-speakers">
               <option value="">Auto-detect</option>
-              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
-              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
-              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
-              <option value="10">10</option>
             </select>
           </label>
           <label class="toggle-label">Identify speakers
             <input type="checkbox" id="opt-diarize" checked class="toggle">
           </label>
+          <label>Chinese characters
+            <select id="opt-script">
+              <option value="">Keep as transcribed</option>
+              <option value="traditional_hk">Traditional — Hong Kong 繁體（香港）</option>
+              <option value="traditional_tw">Traditional — Taiwan 繁體（台灣）</option>
+              <option value="simplified">Simplified 简体</option>
+            </select>
+          </label>
         </div>
         <div class="hint">Not sure how many people talk? Leave it on <b>Auto-detect</b>. If the count comes
-          out wrong, use <b>Re-detect speakers</b> on the transcript — no need to transcribe again.</div>
+          out wrong, use <b>Re-detect speakers</b> on the transcript — no need to transcribe again. Cantonese sometimes comes out in Simplified
+          characters — pick <b>Traditional — Hong Kong</b> to always get 繁體.</div>
 
         <div class="start-row">
           <button class="btn primary large" id="start-btn" disabled>Start transcribing</button>
@@ -102,6 +107,14 @@
             <div class="result-meta" id="result-meta"></div>
           </div>
           <div class="btn-group">
+            <label class="inline-label" title="Convert all Chinese characters in this transcript">Characters
+              <select id="convert-script">
+                <option value="">Convert to…</option>
+                <option value="traditional_hk">繁體 (Hong Kong)</option>
+                <option value="traditional_tw">繁體 (Taiwan)</option>
+                <option value="simplified">简体 (Simplified)</option>
+              </select>
+            </label>
             <button class="btn" data-dl="json">JSON</button>
             <button class="btn" data-dl="vtt">VTT</button>
             <button class="btn" data-dl="srt">SRT</button>
@@ -119,10 +132,6 @@
           <label>How many speakers?
             <select id="rediarize-count">
               <option value="">Auto-detect</option>
-              <option value="1">1</option><option value="2">2</option><option value="3">3</option>
-              <option value="4">4</option><option value="5">5</option><option value="6">6</option>
-              <option value="7">7</option><option value="8">8</option><option value="9">9</option>
-              <option value="10">10</option>
             </select>
           </label>
           <button class="btn primary small" id="rediarize-go">Re-detect</button>

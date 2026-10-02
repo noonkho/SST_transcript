@@ -7,6 +7,7 @@ from typing import Callable
 import numpy as np
 import torch
 
+from .. import _compat  # noqa: F401  — silences torchcodec noise before pyannote loads
 from ..audio import SAMPLE_RATE
 from .base import Diarizer, SpeakerTurn
 
@@ -87,12 +88,13 @@ def _progress_hook(progress: Callable[[float], None]):
     """Adapt pyannote's hook(step, artifact, file=, total=, completed=) to a
     0..1 progress callback. pyannote calls it once per batch, so raising from
     `progress` (job cancelled) stops the pipeline within one batch."""
-    last = [0.0]
+    last = 0.0
 
     def hook(step_name, step_artifact, file=None, total=None, completed=None):
+        nonlocal last
         span = _STEP_SPAN.get(step_name)
         if span and total:
             lo, hi = span
-            last[0] = max(last[0], lo + (hi - lo) * (completed or 0) / total)
-        progress(last[0])  # also the cancellation check for un-weighted steps
+            last = max(last, lo + (hi - lo) * (completed or 0) / total)
+        progress(last)  # also the cancellation check for un-weighted steps
     return hook

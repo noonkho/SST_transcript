@@ -18,7 +18,14 @@ from huggingface_hub import HfApi
 
 from .config import DATA_DIR, config
 from .device import pick_device
-from .registry import BUILTIN_DIARIZATION_DEPS, classify_hf_model, find_entry
+from .registry import (
+    BUILTIN_DIARIZATION_DEPS,
+    CATALOG,
+    HELPER_REPOS,
+    classify_hf_model,
+    find_entry,
+    repo_targets,
+)
 
 log = logging.getLogger("sst.manager")
 
@@ -77,6 +84,20 @@ def _watch_download(state: DownloadState, targets: list[str]) -> None:
             state.eta_seconds = None
 
 
+def _local_path(repo_id: str) -> str:
+    """The downloaded snapshot folder of `repo_id`.
+
+    Loading by folder instead of by repo id keeps transformers from asking the
+    Hub about optional files on every load — on a slow or flaky connection those
+    requests hung model loading for minutes, and offline they fail. Falls back
+    to the repo id if the snapshot isn't found.
+    """
+    try:
+        return huggingface_hub.snapshot_download(repo_id, local_files_only=True)
+    except Exception:  # noqa: BLE001
+        return repo_id
+
+
 class ModelManager:
     def __init__(self) -> None:
         self.downloads: dict[str, DownloadState] = {}
@@ -122,6 +143,10 @@ class ModelManager:
             result.add("builtin/vad-ecapa-clustering")
         else:
             result.discard("builtin/vad-ecapa-clustering")
+        # a model whose helper repo (e.g. Qwen's timing aligner) is missing can't run
+        for entry in CATALOG:
+            if entry.extra_repos and not all(r in result for r in entry.extra_repos):
+                result.discard(entry.repo_id)
         return result
 
     # ---------------- downloads
@@ -139,7 +164,7 @@ class ModelManager:
     def _download(self, repo_id: str, state: DownloadState) -> None:
         import fnmatch
 
-        targets = BUILTIN_DIARIZATION_DEPS if repo_id == "builtin/vad-ecapa-clustering" else [repo_id]
+        targets = repo_targets(repo_id)
         try:
             api = HfApi(token=config.hf_token or None)
             plans: list[tuple[str, list[str]]] = []  # (target, ignore_patterns)
@@ -229,8 +254,7 @@ class ModelManager:
     def custom_downloaded(self) -> list[dict]:
         """Downloaded repos that are not part of the curated catalog
         (added via Hugging Face search)."""
-        from .registry import CATALOG
-        known = {e.repo_id for e in CATALOG} | set(BUILTIN_DIARIZATION_DEPS)
+        known = {e.repo_id for e in CATALOG} | HELPER_REPOS
         out = []
         for repo in sorted(self.downloaded_repos()):
             if repo in known or repo.startswith("builtin/"):
@@ -245,7 +269,10 @@ class ModelManager:
             raise RuntimeError("This model is currently loaded — switch to another model first.")
         if repo_id in (config.stt_model, config.diarization_model):
             raise RuntimeError("This model is currently selected — select another model first.")
-        targets = BUILTIN_DIARIZATION_DEPS if repo_id == "builtin/vad-ecapa-clustering" else [repo_id]
+        # keep a helper repo another downloaded model still needs (shared aligner)
+        downloaded = self.downloaded_repos() - {repo_id}
+        still_needed = {r for other in downloaded for r in repo_targets(other)[1:]}
+        targets = [t for t in repo_targets(repo_id) if t == repo_id or t not in still_needed]
         info = huggingface_hub.scan_cache_dir()
         hashes = [
             rev.commit_hash
@@ -337,8 +364,12 @@ class ModelManager:
         if engine_name == "sensevoice":
             from .stt.sensevoice import SenseVoiceEngine
             return SenseVoiceEngine(repo_id, device)
+        if engine_name == "qwen3asr":
+            from .stt.qwen3_asr import DEFAULT_ALIGNER, Qwen3AsrEngine
+            aligner = entry.extra_repos[0] if entry and entry.extra_repos else DEFAULT_ALIGNER
+            return Qwen3AsrEngine(_local_path(repo_id), device, _local_path(aligner))
         from .stt.whisper_hf import WhisperEngine
-        return WhisperEngine(repo_id, device)
+        return WhisperEngine(_local_path(repo_id), device)
 
     def _build_diar(self, repo_id: str):
         self._require_downloaded(repo_id)

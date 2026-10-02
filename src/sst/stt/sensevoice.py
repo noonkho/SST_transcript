@@ -40,7 +40,7 @@ class SenseVoiceEngine(SttEngine):
         )
 
     def transcribe_chunk(self, audio: np.ndarray, language: str | None,
-                         should_stop=None) -> list[SttSegment]:  # chunks take < 1 s; no early stop
+                         check_cancelled=None) -> list[SttSegment]:  # chunks take < 1 s
         lang = _LANG_MAP.get(language or "", "auto")
         result = self.model.generate(
             input=audio.astype(np.float32),
